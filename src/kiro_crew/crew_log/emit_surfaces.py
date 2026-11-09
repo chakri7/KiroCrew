@@ -9,17 +9,27 @@ asks for one of them.
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from kiro_crew.crew_log.emit_runtime import _handle, _submit, _write, live_turn
+from kiro_crew.crew_log.emit_runtime import _handle, _report, _submit, _write, live_turn
 from kiro_crew.crew_log.emit_state import _SRC_GATEWAY, _note_eager, enabled
 from kiro_crew.crew_log.emit_text import _clip, _entry_line_fits, _safe_text
 
+if TYPE_CHECKING:
+    from kiro_crew.crew_log.late_writes import Receipt
 
-def on_ledger_recorded(session_id: str, data: dict[str, Any]) -> None:
+
+def on_ledger_recorded(
+    session_id: str,
+    data: dict[str, Any],
+    *,
+    slot: str = "",
+    publish: "Callable[[str], None] | None" = None,
+) -> "Receipt":
     """Append ONE ``ledger/recorded`` entry -- a session's own durable work state.
 
     The write half of the session ledger. Every field the caller set rides on this
@@ -34,11 +44,83 @@ def on_ledger_recorded(session_id: str, data: dict[str, Any]) -> None:
     exactly the sessions that are running. Going through the writer also keeps this
     entry ordered against the turn it was recorded inside.
 
-    The caller is the one that establishes the session has a crew log to write to;
-    this is the ordinary ``_write``, so a session without one is a policy no-op
-    here and the refusal belongs where a user can be told about it.
+    With *slot* (the unit header's slot) the job decides on that slot's lane where the
+    entry goes and publishes it there (:func:`_record_on_slot_lane`); without one it is
+    appended to *session_id* as it is. The caller is the one that establishes the
+    session has a crew log to write to; a session without one settles the receipt as
+    not landed, and the refusal belongs where a user can be told about it.
     """
-    _write(session_id, "ledger/recorded", data, src=_SRC_GATEWAY)
+    from kiro_crew.session_ledger_layout import _FOLD_NAME
+
+    return _record_on_slot_lane(
+        session_id, "ledger/recorded", data, slot=slot, fold=_FOLD_NAME, publish=publish
+    )
+
+
+def _record_on_slot_lane(
+    session_id: str,
+    entry_type: str,
+    data: dict[str, Any],
+    *,
+    slot: str,
+    fold: str,
+    publish: "Callable[[str], None] | None",
+) -> "Receipt":
+    """Append one ledger entry for *slot* in ONE writer job, and answer with its receipt.
+
+    The job runs in *session_id*'s bucket, and the writer holds one slot's units to one
+    lane (``writer_groups``), so the successor's carry commit (``emit_session._write_carries``)
+    runs wholly before or wholly after it. In the job: when a later unit of *slot* already
+    carried *fold* (:func:`~kiro_crew.crew_log.late_writes.hand_to_carrier`), the same job
+    is handed to the slot's newest unit, whose own bucket runs it and asks again;
+    otherwise the entry is appended here, *publish* is told the unit it landed in (the
+    caller's unit-order note), and the receipt is settled with that unit and the entry's
+    seq. All three on the lane, so a carry cannot land between the answer and the append,
+    nor between the append and the order it publishes.
+
+    A refusal settles the receipt as not landed. A job retained after a failed attempt
+    is tried again from the start, so it asks again. A job handed to a newer unit and
+    lost there leaves the receipt unsettled, which reads as not landed.
+    """
+    from kiro_crew.crew_log import late_writes, writer_groups
+
+    receipt = late_writes.Receipt(session_id)
+    if not session_id or not enabled():
+        receipt.settle(session_id, 0, landed=False)
+        return receipt
+    if slot and not writer_groups.known(session_id):
+        # Before the hand-over, so the writer holds this unit to its slot's lane for the
+        # job's first claim (a unit this process did not open has no key otherwise).
+        writer_groups.note_unit_slot(session_id, slot)
+
+    def _land(unit: str) -> None:
+        moved = f"appending {entry_type} under the unit its slot moved to"
+        if late_writes.hand_to_carrier(slot, unit, (fold,), _land, moved):
+            return
+        log = _handle(unit)
+        if log is None:
+            receipt.settle(unit, 0, landed=False)
+            return
+        entry = log.append(entry_type, data, src=_SRC_GATEWAY)
+        del log
+        if publish is not None:
+            try:
+                publish(unit)
+            except Exception as exc:
+                # The entry is in the file: a raise here would have the writer retry the
+                # job and append it twice. The order note is best-effort by its own rule.
+                _report(f"publishing the unit order for {entry_type}", exc, op="unit-order")
+        receipt.settle(unit, int(entry.seq), landed=True)
+        # After the order is published: the fold this wake triggers reads that order.
+        _note_eager(entry, entry_type, unit, data)
+
+    _submit(
+        functools.partial(_land, session_id),
+        f"appending {entry_type}",
+        session_id,
+        on_permanent_drop=lambda: receipt.settle(session_id, 0, landed=False),
+    )
+    return receipt
 
 
 def ledger_entry_fits(data: dict[str, Any]) -> bool:
@@ -130,7 +212,14 @@ def on_object_observed(
     _write(session_id, "object/observed", data, src=_SRC_GATEWAY)
 
 
-def on_radar_recorded(session_id: str, data: dict[str, Any]) -> None:
+def on_radar_recorded(
+    session_id: str,
+    data: dict[str, Any],
+    *,
+    slot: str = "",
+    fold: str = "",
+    publish: "Callable[[str], None] | None" = None,
+) -> "Receipt":
     """Append ONE ``radar/recorded`` entry -- an Issue Radar crew's own ledger update.
 
     The write half of the crew ledger. Every field the caller set rides on this single
@@ -146,11 +235,14 @@ def on_radar_recorded(session_id: str, data: dict[str, Any]) -> None:
     working. Going through the writer also keeps the entry ordered against the turn
     it was recorded inside.
 
-    The caller establishes that the crew's session has a crew log to write to; this
-    is the ordinary ``_write``, so a session without one is a policy no-op here and the
-    refusal belongs where the crew can be told about it.
+    With the crew's *slot* and its *fold*, the job decides on the slot's lane where the
+    entry goes and publishes it there, as :func:`on_ledger_recorded` does. The caller
+    establishes that the crew's session has a crew log to write to; a session without
+    one settles the receipt as not landed.
     """
-    _write(session_id, "radar/recorded", data, src=_SRC_GATEWAY)
+    return _record_on_slot_lane(
+        session_id, "radar/recorded", data, slot=slot, fold=fold, publish=publish
+    )
 
 
 def radar_entry_fits(data: dict[str, Any]) -> bool:
@@ -210,40 +302,60 @@ def on_panel_published(session_id: str, data: dict[str, Any], *, timeout: float 
     that member's slot and the slug-keyed read finds it without a binding of its
     own. A session with no crew log answers ``False`` here, and the refusal belongs
     where the crew can be told about it.
+
+    The route resolved *session_id* before the job runs, and a reset can carry the slot
+    into a newer unit in between, so the job lands the entry the way
+    :func:`on_work_recorded` does: on the slot's lane, in the slot's newest unit once
+    that unit carried the panel, with the panel order published for the unit it landed
+    in.
     """
     if not session_id or not enabled():
         return False
     landed = threading.Event()
     gate = threading.Lock()
     outcome = {"ok": False, "abandoned": False}
+    # The unit's slot, before the hand-over, for the reason ``on_work_recorded`` gives.
+    from kiro_crew import session_ledger
+    from kiro_crew.crew_log import late_writes, writer_groups
 
-    def _job() -> None:
+    if not writer_groups.known(session_id):
+        writer_groups.note_unit_slot(session_id, session_ledger.canonical_slot("", session_id))
+    slot = writer_groups.slot_of(session_id)
+    folds = late_writes.folds_fed_by("panel/published")
+
+    def _land(unit: str) -> None:
         with gate:
             # A waiter that gave up has abandoned the entry: it must not land later,
             # or a publish the crew was told failed would reappear on the next fold.
             # Under the gate the two outcomes cannot cross.
             if outcome["abandoned"]:
                 return
-            log = _handle(session_id)
-            if log is None:
+            moved = "appending panel/published under the unit its slot moved to"
+            if late_writes.hand_to_carrier(slot, unit, folds, _land, moved):
                 return
-            entry = log.append("panel/published", data, src=_SRC_GATEWAY)
-            # The panel fold spans replacement sessions, and a unit header's clock can
-            # step BACKWARD, which would fold a retired session's publish last and make
-            # it the current panel with history built against the wrong predecessor.
-            # Publish the causal order only after this append has really landed.
-            from kiro_crew import session_ledger
+            log = _handle(unit)
+            if log is not None:
+                entry = log.append("panel/published", data, src=_SRC_GATEWAY)
+                # The panel fold spans replacement sessions, and a unit header's clock can
+                # step BACKWARD, which would fold a retired session's publish last and make
+                # it the current panel with history built against the wrong predecessor.
+                # Publish the causal order only after this append has really landed.
+                session_ledger.note_panel_unit_recorded("", unit)
+                # AFTER the order is recorded, never before. The fold the wake triggers
+                # reads that order to decide which unit applies last, so a wake enqueued
+                # first can be folded on a thread that still sees this unit unordered --
+                # and the panel fold takes the newest entry whole, so it would serve a
+                # retired session's panel as the current one.
+                _note_eager(entry, "panel/published", unit, data)
+                outcome["ok"] = True
+        landed.set()
 
-            session_ledger.note_panel_unit_recorded("", session_id)
-            # AFTER the order is recorded, never before. The fold the wake triggers reads
-            # that order to decide which unit applies last, so a wake enqueued first can
-            # be folded on a thread that still sees this unit unordered -- and the panel
-            # fold takes the newest entry whole, so it would serve a retired session's
-            # panel as the current one.
-            _note_eager(entry, "panel/published", session_id, data)
-            outcome["ok"] = True
-
-    _submit(_job, "appending panel/published", session_id, after=landed.set)
+    _submit(
+        functools.partial(_land, session_id),
+        "appending panel/published",
+        session_id,
+        on_permanent_drop=landed.set,
+    )
     if landed.wait(timeout):
         return outcome["ok"]
     with gate:
@@ -613,47 +725,66 @@ def on_work_recorded(session_id: str, data: dict[str, Any], *, timeout: float = 
     the store takes: its outcome is then reported truthfully rather than guessed.
     The work ledger is a projection of these entries, so its routes report
     success only on ``True``.
+
+    The caller resolved *session_id* before the job runs (the report route's
+    ``_conductor_unit``), and a reset can carry the slot into a newer unit in between.
+    So the job decides on the slot's lane where the entry goes
+    (:func:`~kiro_crew.crew_log.late_writes.hand_to_carrier`): into the slot's newest
+    unit when that unit carried a fold the entry feeds, and the work order is published
+    for the unit the entry landed in. The answer is the job's that appended: a job
+    handed on releases no one, and one lost after it was handed on leaves the waiter to
+    its *timeout*, which answers ``False``.
     """
     if not session_id or not enabled():
         return False
     landed = threading.Event()
     gate = threading.Lock()
     outcome = {"ok": False, "abandoned": False}
+    # The unit's slot, before the hand-over, so the writer never writes this unit beside
+    # a sibling of its slot (``writer_groups``) and the job's landing is decided on that
+    # slot's lane: a report into a unit this process did not open (the conductor's unit
+    # after a restart) has no key otherwise. A header read, off the loop: this caller
+    # blocks on the answer, so it runs on a thread.
+    # Imported here: emit_surfaces is on the boot path, the writer modules are not.
+    from kiro_crew import session_ledger
+    from kiro_crew.crew_log import late_writes, writer_groups
 
-    def _job() -> None:
+    by = str(data.get("by") or "")
+    if not writer_groups.known(session_id):
+        writer_groups.note_unit_slot(session_id, session_ledger.canonical_slot(by, session_id))
+    slot = writer_groups.slot_of(session_id)
+    folds = late_writes.folds_fed_by("work/recorded")
+
+    def _land(unit: str) -> None:
         with gate:
             # A waiter that gave up has abandoned the entry: it must not land
             # later, or a write the caller was told failed would come back on
             # the next rebuild. Under the gate the two outcomes cannot cross.
             if outcome["abandoned"]:
                 return
-            log = _handle(session_id)
-            if log is None:
+            moved = "appending work/recorded under the unit its slot moved to"
+            if late_writes.hand_to_carrier(slot, unit, folds, _land, moved):
                 return
-            entry = log.append("work/recorded", data, src=_SRC_GATEWAY)
-            # The work fold spans replacement sessions, so header wall clocks are
-            # not a causal order. Publish only after this append has really landed.
-            from kiro_crew import session_ledger
+            log = _handle(unit)
+            if log is not None:
+                entry = log.append("work/recorded", data, src=_SRC_GATEWAY)
+                # The work fold spans replacement sessions, so header wall clocks are
+                # not a causal order. Publish only after this append has really landed.
+                session_ledger.note_work_unit_recorded(by, unit)
+                # AFTER the order is recorded, for the reason the panel emitter gives: the
+                # fold this wake triggers reads that order.
+                _note_eager(entry, "work/recorded", unit, data)
+                outcome["ok"] = True
+        landed.set()
 
-            session_ledger.note_work_unit_recorded(str(data.get("by") or ""), session_id)
-            # AFTER the order is recorded, for the reason the panel emitter gives: the
-            # fold this wake triggers reads that order.
-            _note_eager(entry, "work/recorded", session_id, data)
-            outcome["ok"] = True
-
-    # The unit's slot, before the hand-over, so the writer never writes this unit beside
-    # a sibling of its slot (``writer_groups``): a report into a unit this process did
-    # not open (the conductor's unit after a restart) has no key otherwise. A header
-    # read, off the loop: this caller blocks on the answer, so it runs on a thread.
-    # Imported here: emit_surfaces is on the boot path, the writer modules are not.
-    from kiro_crew import session_ledger
-    from kiro_crew.crew_log import writer_groups
-
-    if not writer_groups.known(session_id):
-        writer_groups.note_unit_slot(
-            session_id, session_ledger.canonical_slot(str(data.get("by") or ""), session_id)
-        )
-    _submit(_job, "appending work/recorded", session_id, after=landed.set)
+    # Released by the job that appended, or found no log, or by the first job's permanent
+    # drop: never by a job that handed the entry on, whose answer is still to come.
+    _submit(
+        functools.partial(_land, session_id),
+        "appending work/recorded",
+        session_id,
+        on_permanent_drop=landed.set,
+    )
     if landed.wait(timeout):
         return outcome["ok"]
     with gate:
