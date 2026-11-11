@@ -474,6 +474,7 @@ class AcpSessionProvider(LLMProvider):
         # the previous one's did.
         new_handle.delete_delay_secs = getattr(old, "delete_delay_secs", 0.0)
         self._handle = new_handle
+        old.mcp_session_report().hand_over(new_handle.mcp_session_report())  # its reader follows
         # The fresh session/new restored nothing: a session/load observation from
         # the old handle would make the next turn skip its history replay
         # (``turn_dispatch_gates``) and run on an empty conversation. Same as
