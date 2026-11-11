@@ -43,6 +43,68 @@ def session_mcp_problems(provider: Any) -> str:
         return ""
 
 
+def session_mcp_states(provider: Any) -> dict[str, tuple[str, ...]] | None:
+    """The servers *provider*'s session cannot use right now, by state.
+
+    ``SessionMcpReport.not_ready`` for a turn's ``[MCP SERVERS]`` block: names
+    only, never a failure reason. ``None`` for no provider, a provider that keeps
+    no report, and a report that cannot be read, so the caller says nothing.
+    """
+    if provider is None:
+        return None
+    try:
+        report = provider.mcp_session_report()
+        return dict(report.not_ready()) if report is not None else None
+    except Exception:
+        logger.debug("MCP session report unreadable", exc_info=True)
+        return None
+
+
+#: How long one ``mcp_server_wait`` call waits for a server that is still
+#: connecting. Sized from measured starts: the largest healthy set measured (64
+#: servers) was fully connected about 35 s after its session started, and the
+#: engine itself gives one server 60 s by default once it holds a connect slot.
+#: So this is that budget plus the longest queue seen; past it a server is hung
+#: or queued behind hung ones, and the turn goes on without it.
+MCP_SERVER_WAIT_SECS = 90.0
+
+#: Names an ``unknown`` answer lists so a misspelt server name can be corrected.
+_STATE_NAMES_LISTED = 32
+
+
+def mcp_server_state(provider: Any, name: str) -> dict[str, Any]:
+    """What is true of the server *name* in *provider*'s session, for ``mcp_server_wait``.
+
+    ``{"mcp_server_state": <state>}`` with the session report's own word
+    (``connected``, ``connecting``, ``failed``, ``needs_sign_in``, ``disabled``,
+    ``registry_dropped``) or ``unknown``. A name that differs from one of the
+    session's servers only by case is read as that server when it can mean only
+    one. ``unknown`` also carries ``mcp_server_names``: the servers the name could
+    mean, else the names this session cannot use yet, so it can be corrected. A
+    provider that keeps no report, or one that cannot be read, answers
+    ``unknown``: the caller then says it could not tell.
+    """
+    states = session_mcp_states(provider)
+    if states is None:
+        return {"mcp_server_state": "unknown"}
+    try:
+        ready = (provider.mcp_session_report().payload() or {}).get("ready") or ()
+    except Exception:
+        logger.debug("MCP session report unreadable", exc_info=True)
+        ready = ()
+    by_name = {known: "connected" for known in ready if isinstance(known, str)}
+    # Placed second: a state the session cannot use wins over an older ready report.
+    by_name.update({known: state for state, names in states.items() for known in names})
+    alike = [known for known in by_name if known.casefold() == name.casefold()]
+    # Two servers may differ only by case, so the exact name is read first and a
+    # different spelling is taken for a server only when it can mean one.
+    exact = name if name in by_name else alike[0] if len(alike) == 1 else None
+    if exact is not None:
+        return {"mcp_server_state": by_name[exact]}
+    listed = alike or [known for names in states.values() for known in names]
+    return {"mcp_server_state": "unknown", "mcp_server_names": listed[:_STATE_NAMES_LISTED]}
+
+
 async def wait_for_declared_mcp(provider: Any, timeout: float) -> None:
     """Hold an unattended run's first prompt until the spec's servers report.
 

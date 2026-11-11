@@ -34,6 +34,7 @@ from kiro_crew.acp.mcp_reattempt import is_recoverable_auth_failure, is_start_ti
 from kiro_crew.acp.mcp_session_report import (
     BUCKET_CAP,
     NAME_CAP,
+    STATUS_CAP,
     KasMcpReadiness,
     McpSessionReport,
     sanitize_sink_text,
@@ -510,7 +511,10 @@ def _record_drops(report: McpSessionReport, absent: tuple[str, ...]) -> None:
     """
     for name in absent:
         if not report.has_reported(name):
-            report.record_event(EVENT_MCP_SERVER_INIT_FAILURE, name, GOVERNED_DROP_REASON)
+            # Kiro Crew's own finding, not a word from the host.
+            report.record_event(
+                EVENT_MCP_SERVER_INIT_FAILURE, name, GOVERNED_DROP_REASON, from_host=False
+            )
 
 
 def _registry_filtered_message(readiness: KasMcpReadiness) -> str:
@@ -717,7 +721,7 @@ def _note_mcp_sign_in_status(self: AcpSessionHandle, msg: JsonRpcMessage, *, off
     and a start that fails is torn down.
 
     Bounded like the session's MCP report reads the same frame: at most
-    ``BUCKET_CAP`` entries, and a name over ``NAME_CAP`` is skipped rather
+    ``STATUS_CAP`` entries, and a name over ``NAME_CAP`` is skipped rather
     than truncated, because a cut name names a server the engine does not
     have. The completed set is bounded the same way: it is drained only by
     the dispatch loop, so a completion that would take it past
@@ -732,8 +736,8 @@ def _note_mcp_sign_in_status(self: AcpSessionHandle, msg: JsonRpcMessage, *, off
     if not isinstance(servers, list):
         return
     present: set[str] = set()
-    dropped = max(0, len(servers) - BUCKET_CAP)
-    for server in servers[:BUCKET_CAP]:
+    dropped = max(0, len(servers) - STATUS_CAP)
+    for server in servers[:STATUS_CAP]:
         if not isinstance(server, dict) or not isinstance(server.get("name"), str):
             continue
         name = server["name"]

@@ -44,8 +44,9 @@ JOB_TOOL_BUDGETS: dict[str, int] = {
     "kirocrew": 3_300,
     "kirocrew-worker": 1_200,
     "kirocrew-mate-worker": 1_200,
-    "kirocrew-pipeline-conductor": 7_600,
-    "kirocrew-security-conductor": 7_600,
+    # 7,653 with ``mcp_server_wait`` (63 tokens, on every row): the next 50 up.
+    "kirocrew-pipeline-conductor": 7_700,
+    "kirocrew-security-conductor": 7_700,
     "kirocrew-conductor": 7_800,
     "kirocrew-ledger-conductor": 7_800,
     "kirocrew-team-lead": 7_800,

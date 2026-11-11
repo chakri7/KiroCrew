@@ -2498,22 +2498,27 @@ session, in the chat's MCP panel and for every other reader.
   caps bound them too.
 - **One vocabulary for a server's state.** `not_ready()` sorts every server the
   session cannot use into exactly one of `disabled`, `registry_dropped`,
-  `needs_sign_in`, `failed`, `connecting` (`NOT_READY_STATES`, tested in that
-  order); `ready` is the connected list. `connecting` is every server the session
+  `needs_sign_in`, `failed`, `connecting` (tested in that order); `ready` is
+  the connected list. `connecting` is every server the session
   expects and has not heard a settled state from: one the spec declares, one Kiro
   Crew sent on the wire (a Connection's bridge, a routed stub), or one the host's
-  latest snapshot lists as not settled. A status frame is the host's whole list,
+  latest snapshot lists as not settled. It is claimed only once the HOST has
+  reported something (a status snapshot, or any server's start), never from
+  what Kiro Crew records itself (a server it pruned, a mount-check finding): a
+  host that never reports its servers, such as a cloud sandbox or a harness
+  with no status frames, would otherwise have every server read as starting
+  for ever. A status frame is the host's whole list,
   so what the host calls disabled or pending is replaced by each snapshot, never
   added to. The sources are joined whole and a name is placed by what is true of
   it before any list is cut, so servers that are ready never crowd a connecting
-  one out. `payload()` carries the reading as `states` (empty states left out,
-  each list at most the bucket cap) and `states_omitted`: the names cut from
-  those lists plus the names each source's own cap cut (declared servers past
-  the ones kept by name, muted servers, registry-dropped servers, not-connected
-  snapshot entries past the ones read). It is exact while every source fits its
-  cap; past the caps a server two sources both cut is counted by each, so it is
-  an upper bound and never an under-count. Names only: a failure reason stays in
-  `failures`.
+  one out. Empty states are left out and each list holds at most `STATUS_CAP`,
+  256 names, which is also what the `ready`, `failed` and `awaiting_auth`
+  buckets, a snapshot read, the wire roster, and the declared, muted and
+  registry-dropped lists hold: one bound for every list the reading joins,
+  four times the largest set measured, so a session with 64 of the user's
+  servers beside Kiro Crew's own is described whole. Its readers are a turn's `[MCP SERVERS]` block and `mcp_server_wait`;
+  `payload()` does not carry it (no dashboard reads it yet). Names only: a
+  failure reason stays in `failures`.
 - **A change is announced, not polled for.** `fold_frame` calls the report's
   `on_change` when the fold changed it, and `forget_reported` when it dropped
   something. A reader sets it through
@@ -2542,6 +2547,33 @@ session, in the chat's MCP panel and for every other reader.
 
 Pinned by `test_mcp_report_arrival_fold.py` and, against a real engine stub,
 `test_kas_session_start_queue.py::test_a_late_server_reaches_the_report_with_nothing_reading_the_session`.
+
+### Which servers the first prompt waits for (`acp/mcp_start_wait.py`)
+
+One rule, stated in `first_prompt_brief_wait` and applied where a session start
+ends (`runtime_session_load._wait_managed_mcp`, for `session/new` and
+`session/load` alike):
+
+| Servers | A person is waiting (`StartPriority.FOREGROUND`) | Nobody is waiting (`BACKGROUND`) |
+|---|---|---|
+| Kiro Crew's own managed servers | required: the whole start budget, the start fails without them | the same |
+| Sent on the session by Kiro Crew (a Connection's bridge, a routed stub) | best effort, at most `MOUNTED_MCP_WAIT_SECS` (5 s) | the same |
+| The agent's own (the user's), which stay in the agent's block | not waited for | best effort, at most 5 s |
+
+A person is waiting when `kiro_crew.start_priority` says so: the claim the
+session manager puts on the provider it starts, threaded from `create_session`
+and `_load_session_with_retry`. A caller that passes none starts as `BACKGROUND`:
+a sub-agent child, an unattended run (which also holds its first prompt up to
+`UNATTENDED_MCP_WAIT_SECS` for its declared servers), a warm start, a late
+collected start, and a re-sent server set (`session_provider_mcp_reinject`), so
+each waits exactly as before.
+
+Kiro CLI does not wait for a user's servers either. Not waiting is safe because
+the host reads its server list when a tool is loaded, so a server that connects
+during the turn serves it; the session's report follows the server (above), the
+turn is told which servers are still starting (`[MCP SERVERS]`,
+`context_assembly/mcp_servers.py`), and the model can wait for the one it needs
+(`mcp_server_wait`). Pinned by `test_mcp_start_wait.py`.
 
 ### KAS managed MCP readiness
 
@@ -2959,7 +2991,7 @@ Two `initialize` flags under `agentCapabilities._meta.kiro` are read; only `mcpR
 
 A remote OAuth MCP server that KAS cannot reach without a token reports a `failed` status entry with `failedAuthorization: true`. Its `authorizationUrl` comes from a passive connect whose loopback callback listener is already closed, so Crew never renders it. A sign-in that can complete is started by the client: `_kiro/mcp/resetServer` with `{sessionId, serverName, startOAuth: true}` makes the engine keep its callback listener open for the whole connect attempt (the server's connect timeout, 60 s by default) and send the consent URL as a `_kiro/openExternalUrl` request. The engine sends that request only because `KAS_CLIENT_CAPABILITIES` declares `_meta.kiro.openExternalUrl`.
 
-The session handle tracks, from its own status snapshots, which servers need a sign-in: added on `failedAuthorization`, removed once the server connects, is disabled, or leaves the snapshot. A timed-out attempt reports `failedAuthorization: false` with a timeout error, so the server stays tracked. The tracker reads at most the report's `BUCKET_CAP` entries and skips a name over `NAME_CAP`.
+The session handle tracks, from its own status snapshots, which servers need a sign-in: added on `failedAuthorization`, removed once the server connects, is disabled, or leaves the snapshot. A timed-out attempt reports `failedAuthorization: false` with a timeout error, so the server stays tracked. The tracker reads at most the report's `STATUS_CAP` entries, as far into a snapshot as the report itself reads, and skips a name over `NAME_CAP`.
 
 Needing a sign-in never starts one. An unsigned KAS server's tools are invisible to the model (exposure needs the catalog of a `connected` entry, above), so the agent can never call one, and a tool call cannot be the trigger. The trigger is the user's own message: before each user turn, the dashboard runner hands what the person asked (`user_typed_message`: captured before `@prompt`/`$skill` expansion, with no cancelled-turn preamble, sub-agent failure text or app context, any of which could name a server the message did not; only a turn with `_directive_user_origin` from a person's dashboard/channel send or human app-chat hands text over; a generated app dispatch, an OpenAI-compatible request (its prompt is the flattened conversation), a Spec Builder decision answer (composed from the agent's title and options), or a Regenerate replay of a stored row, all `_message_is_typed=False`, a turn restored from the on-disk queue (`_turn_provenance_restored`), synthetic turn, self-wake, slash command, `/prompts get` re-entry, or turn with a `_turn_actor` hands nothing) to the provider's declared `LLMProvider.note_user_message` (a no-op by default; the direct kiro-cli client has no trigger). `AcpProvider.note_user_message` holds the text only until that provider's next `stream()` or `stream_command()`, which takes and clears it at entry before anything can fail; `stream_command()` discards it. For `stream()`, the text then travels as an argument into that one attempt's handle `prompt`/`_run_turn`, after any pending MCP re-injection, so it never outlives the attempt or reaches a later automated turn. After the pre-turn drain, `_run_turn` calls `want_mcp_sign_in_named` with that attempt's text to mark each tracked server it names as wanted. The handle holds the text for that one turn and matches it on each mid-turn status snapshot, each server at most once, so a server whose `failedAuthorization` status was still queued or arrives mid-turn is found; the turn's end clears it, so a later cron or sub-agent turn never matches an old message. A server is named by its configured name or an obvious alias (`mcp_server_aliases`: the words split at separators, the part after a `namespace:` prefix (a one-word part only when it repeats the namespace), a Kiro Power's name without its `power-` prefix with repeated words collapsed (`power-figma-figma` gives `figma`, but a multi-word name's last word alone, such as `search` from `power-aws-docs-search`, never counts), each without a trailing `mcp` or `server` word, repeated words collapsed, derived aliases under three characters or only `mcp`/`server` dropped, while the configured name itself always counts, so a server named `gh` or `mcp` can still be named), or by a registry provider's `sign_in_words` when its slug is the server name (`atlassian`: `jira`, `confluence`), case-insensitive and as whole words only. So a chat that never names an unsigned server shows no Authorize card for it, at session start or later. An accepted start removes the server from the wanted set, so one ask starts at most one sign-in. A message that names a server whose sign-in this session already holds in the runtime asks for nothing, which keeps one live card per server. Once an attempt ends (signed in, timed out, or left by the user), only a later message naming the server offers it again; unrelated messages and status snapshots never do.
 
