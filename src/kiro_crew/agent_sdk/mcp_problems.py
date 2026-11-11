@@ -43,6 +43,102 @@ def session_mcp_problems(provider: Any) -> str:
         return ""
 
 
+def session_mcp_states(provider: Any) -> dict[str, tuple[str, ...]] | None:
+    """The servers of *provider*'s session by state, for the turn and the wait tool.
+
+    ``SessionMcpReport.not_ready`` (the servers the session cannot use right now),
+    plus ``connected``: the names the report holds as connected. Names only,
+    never a failure reason. ``connected`` is what lets a reader say a server has
+    connected because the report says so, never because the server stopped being
+    listed. ``None`` for no provider, a provider that keeps no report, and a
+    report that cannot be read, so the caller says nothing.
+    """
+    if provider is None:
+        return None
+    try:
+        report = provider.mcp_session_report()
+        if report is None:
+            return None
+        states = dict(report.not_ready())
+        unusable = {name for names in states.values() for name in names}
+        ready = (report.payload() or {}).get("ready") or ()
+        connected = tuple(n for n in ready if isinstance(n, str) and n not in unusable)
+        if connected:
+            states["connected"] = connected
+        return states
+    except Exception:
+        logger.debug("MCP session report unreadable", exc_info=True)
+        return None
+
+
+class TurnMcpStatesReader:
+    """The reader a gateway installs on its context builder for the ``[MCP SERVERS]`` block.
+
+    *sessions* answers ``get_provider(session_key)``. Calling the reader reads a
+    session's states (:func:`session_mcp_states`). :meth:`told` is called by the
+    block with the servers it spells out as still starting and a mark only that
+    block carries. When they include every server the session's start skipped
+    and still waits on, a prompt that carries the mark goes out without waiting
+    for them (``session_handle_mcp.hold_untold_first_turn``). A read alone
+    records nothing, and a block that was built and never sent exempts no other
+    prompt.
+    """
+
+    def __init__(self, sessions: Any) -> None:
+        self._sessions = sessions
+
+    def __call__(self, session_key: str) -> dict[str, tuple[str, ...]] | None:
+        return session_mcp_states(self._sessions.get_provider(session_key))
+
+    def told(self, session_key: str, mark: str, named: tuple[str, ...]) -> None:
+        """Hand *session_key*'s session what the block marked *mark* spells out. Never raises."""
+        try:
+            provider = self._sessions.get_provider(session_key)
+            report = provider.mcp_session_report() if provider is not None else None
+            if report is not None:
+                report.note_turn_told(mark, named)
+        except Exception:
+            logger.debug("MCP session report unreadable", exc_info=True)
+
+
+#: How long one ``mcp_server_wait`` call waits for a server that is still
+#: connecting. Sized from measured starts: the largest healthy set measured (64
+#: servers) was fully connected about 35 s after its session started, and the
+#: engine itself gives one server 60 s by default once it holds a connect slot.
+#: So this is that budget plus the longest queue seen; past it a server is hung
+#: or queued behind hung ones, and the turn goes on without it.
+MCP_SERVER_WAIT_SECS = 90.0
+
+#: Names an ``unknown`` answer lists so a misspelt server name can be corrected.
+_STATE_NAMES_LISTED = 32
+
+
+def mcp_server_state(provider: Any, name: str) -> dict[str, Any]:
+    """What is true of the server *name* in *provider*'s session, for ``mcp_server_wait``.
+
+    ``{"mcp_server_state": <state>}`` with the session report's own word
+    (``connected``, ``connecting``, ``failed``, ``needs_sign_in``, ``disabled``,
+    ``registry_dropped``) or ``unknown``. A name that differs from one of the
+    session's servers only by case is read as that server when it can mean only
+    one. ``unknown`` also carries ``mcp_server_names``: the servers the name could
+    mean, else the names this session cannot use yet, so it can be corrected. A
+    provider that keeps no report, or one that cannot be read, answers
+    ``unknown``: the caller then says it could not tell.
+    """
+    states = session_mcp_states(provider)
+    if states is None:
+        return {"mcp_server_state": "unknown"}
+    by_name = {known: state for state, names in states.items() for known in names}
+    alike = [known for known in by_name if known.casefold() == name.casefold()]
+    # Two servers may differ only by case, so the exact name is read first and a
+    # different spelling is taken for a server only when it can mean one.
+    exact = name if name in by_name else alike[0] if len(alike) == 1 else None
+    if exact is not None:
+        return {"mcp_server_state": by_name[exact]}
+    listed = alike or [known for known, state in by_name.items() if state != "connected"]
+    return {"mcp_server_state": "unknown", "mcp_server_names": listed[:_STATE_NAMES_LISTED]}
+
+
 async def wait_for_declared_mcp(provider: Any, timeout: float) -> None:
     """Hold an unattended run's first prompt until the spec's servers report.
 
