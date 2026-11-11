@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from kiro_crew.agent_capabilities import CapabilityError
 from kiro_crew.dashboard.chat_utils import MODEL_UNAVAILABLE_KIND, TRANSIENT_RETRY_KIND
+from kiro_crew.dashboard.state import row_mid
 from kiro_crew.security import redact
 from kiro_crew.session_capabilities import CapabilityStartupError
 
@@ -33,7 +34,12 @@ if TYPE_CHECKING:
     )
     from kiro_crew.dashboard.chat_turn.account_identity import _mark_kiro_signed_out
     from kiro_crew.dashboard.chat_turn.eager_spawn import _is_pre_spawn_refusal
-    from kiro_crew.dashboard.chat_turn.recipient import _deliver_linked_slack_message
+    from kiro_crew.dashboard.chat_turn.recipient import (
+        MIRROR_ECHO_OWED_META_KEY,
+        _deliver_linked_slack_message,
+        _mirror_echo_owed,
+        _prompt_typed_in_dashboard,
+    )
     from kiro_crew.dashboard.chat_turn.recovery import (
         _note_cycle_failure,
         _note_cycle_start_failure,
@@ -652,6 +658,35 @@ def _chat_harness_name(session_key: str) -> str:
     return harness_label(backend_to_stored(backend))
 
 
+def _resendable_unsent_mid(turn: _ChatTurn) -> str | None:
+    """The ``mid`` of the row this failed turn never sent, when Resume may resend it.
+
+    Stamped on a ``memory_unavailable`` error row so the Continue endpoint
+    resends that message instead of asking the agent to finish "the most recent
+    request", which in its own session is the one before. Only a person's own
+    dashboard prompt qualifies, or a verbatim replay of one that Resume queued,
+    because the resend runs as the presser's own turn. A turn the agent already
+    consumed gets no stamp.
+    """
+    if turn._consumed_reported or turn._commands_off:
+        return None
+    slot = turn.slot
+    if getattr(slot, "_handoff_generation", None) == getattr(slot, "_turn_generation", None):
+        # The prompt stream already opened, so the agent's session may hold it.
+        return None
+    verbatim_user_resend = (
+        turn._synthetic_recovery_turn
+        and not turn._synthetic_payload
+        and turn._directive_user_origin
+        and not turn._directive_channel_origin
+        and turn._crew_log_actor == "user"
+        and not turn._turn_provenance_restored
+    )
+    if not (verbatim_user_resend or _prompt_typed_in_dashboard(turn)):
+        return None
+    return row_mid(turn._current_replay_message)
+
+
 async def _on_error(turn: _ChatTurn, exc) -> None:
     """Any other error the turn raised."""
     # As in _on_acp_error_card: a recovery the loop's cycle queued is that cycle.
@@ -684,6 +719,12 @@ async def _on_error(turn: _ChatTurn, exc) -> None:
     _err_meta: dict | None = None
     if isinstance(exc, (_MemoryUnavailable, UnknownMemoryStore)):
         _err_meta = {"code": "memory_unavailable"}
+        if _unsent_mid := _resendable_unsent_mid(turn):
+            _err_meta["unsentMid"] = _unsent_mid
+            if _mirror_echo_owed(turn):
+                # The resend is a new turn: without this the linked channel
+                # gets the answer with no quoted question.
+                _err_meta[MIRROR_ECHO_OWED_META_KEY] = True
     elif isinstance(exc, CapabilityError) and exc.code in _SESSION_START_REFUSAL_TEXT:
         # A session-start capability refusal a retry repeats unchanged. The
         # row names the code's own fix, and the card offers that fix (or

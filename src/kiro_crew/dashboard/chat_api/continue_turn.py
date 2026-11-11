@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         _slot_replaced_while_queued,
         _start_next_queued_turn,
         _subagents_attached_response,
+        attachment_meta,
         deny_app_slot_access,
         effective_session_key,
         is_stop_event_row,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
         logger,
         read_bounded_json,
         relay_archive_refusal,
+        row_mid,
         sel,
     )
 
@@ -377,6 +379,26 @@ async def continue_slot_turn(
                 "turn_not_failed",
             )
         resume = _MANUAL_RESUME_MSG if interrupted else _MANUAL_CONTINUE_MSG
+        resume_payload = ""
+        resend_attachments: dict[str, list[str]] = {}
+        resend_echo: dict[str, bool] = {}
+        unsent = unsent_user_row(slot.messages) if interrupted else None
+        if unsent is not None:
+            # Function-local: this owner runs on chat_handlers' globals, which do
+            # not carry these names.
+            from kiro_crew.dashboard.chat_runner import MIRROR_ECHO_OWED_META_KEY
+            from kiro_crew.dashboard.chat_utils import RecoveryPayload
+
+            resume = unsent["content"]
+            resume_payload = RecoveryPayload.ORIGINAL
+            # The drain reads attachment lists off the queue entry, never off
+            # the row, so a resend without them would send the text alone.
+            resend_attachments = attachment_meta(unsent.get("meta"))
+            # ``unsent_user_row`` found a row only because the newest error row
+            # is the stamped one.
+            error_row = next(m for m in reversed(slot.messages) if m.get("role") == "error")
+            if (error_row.get("meta") or {}).get(MIRROR_ECHO_OWED_META_KEY) is True:
+                resend_echo = {MIRROR_ECHO_OWED_META_KEY: True}
         if before_dispatch is not None:
             # Synchronous, under the lock, with no await between it and the
             # insert below: a caller whose authority was decided before the lock
@@ -403,7 +425,14 @@ async def continue_slot_turn(
             0,
             resume,
             kind=SYNTHETIC_RECOVERY_KIND,
-            meta={**containment_meta(state, slot), **(extra_meta or {}), **_card_meta},
+            payload=resume_payload,
+            meta={
+                **containment_meta(state, slot),
+                **(extra_meta or {}),
+                **resend_attachments,
+                **resend_echo,
+                **_card_meta,
+            },
             directive_user_origin=directive_user_origin and not _card_meta,
         )
 
@@ -477,6 +506,50 @@ def session_start_failure_streak(messages: list[dict]) -> int:
         if role in ("user", "assistant") and m.get("content") and not is_system_notice(role, meta):
             break
     return streak
+
+
+def unsent_user_row(messages: list[dict]) -> dict | None:
+    """The message the last turn failed to send, when Resume should resend it.
+
+    A ``memory_unavailable`` error is raised while the turn's context is still
+    being prepared, so the agent's own session never holds that message, and the
+    generic resume body would have it finish the request before this one. The
+    failing turn stamps the message's ``mid`` on the error row as ``unsentMid``
+    when it is a person's own dashboard prompt the agent did not consume (see
+    ``turn_failures._resendable_unsent_mid``).
+
+    The newest turn-anchor row must be that stamped error, and the stamped row
+    must be the person's message or the ``user_replay`` row a Resume left, with
+    text. Anything else returns None and Resume keeps its usual body.
+    """
+    # Rows that open, answer or end a turn. Any other row (a preparation chip, a
+    # skill load, a wire-only marker) is passed over on the way back.
+    anchor_roles = ("user", "inject", "nudge", "subagent", "assistant", "tool", "error")
+    anchor = next((m for m in reversed(messages) if m.get("role") in anchor_roles), None)
+    meta = anchor.get("meta") if anchor is not None else None
+    if (
+        anchor is None
+        or anchor.get("role") != "error"
+        or not isinstance(meta, dict)
+        or meta.get("code") != "memory_unavailable"
+    ):
+        return None
+    mid = meta.get("unsentMid")
+    if not isinstance(mid, str) or not mid:
+        return None
+    row = next((m for m in reversed(messages) if row_mid(m) == mid), None)
+    if row is None:
+        return None
+    row_meta = row.get("meta")
+    is_replay = (
+        row.get("role") == "inject"
+        and isinstance(row_meta, dict)
+        and row_meta.get("injectKind") == "user_replay"
+    )
+    content = row.get("content")
+    if (row.get("role") == "user" or is_replay) and isinstance(content, str) and content.strip():
+        return row
+    return None
 
 
 def _is_stop_event(m: dict) -> bool:
