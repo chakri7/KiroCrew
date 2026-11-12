@@ -29,6 +29,21 @@ def test_nothing_is_armed_until_a_click() -> None:
     assert fields["pending_apply_error"] is None
 
 
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_an_arm_without_a_version_is_refused_and_writes_nothing(_home, blank) -> None:
+    with pytest.raises(ValueError):
+        update_next_start.arm(blank)
+
+    assert not (_home / update_next_start.STATE_FILE).exists()
+
+
+def test_status_carries_when_the_update_was_armed(_home) -> None:
+    assert update_next_start.status_fields()["update_armed_at"] is None
+    armed = update_next_start.arm("9.9.9")
+
+    assert update_next_start.status_fields()["update_armed_at"] == armed.armed_at > 0
+
+
 def test_arming_records_the_version_and_survives_a_new_reader(_home) -> None:
     update_next_start.arm("9.9.9")
 

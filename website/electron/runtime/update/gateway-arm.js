@@ -76,11 +76,14 @@ function createGatewayArm({
     /**
      * Tell a running gateway the user armed an update. Nothing is posted unless
      * its status proves it knows the arm contract.
+     * @param {string} [version] the release main armed, so a gateway that cannot
+     *   see it records the right one.
      * @returns {Promise<boolean>} accepted
      */
-    async arm() {
+    async arm(version) {
       if ((await armedVersion()) === null) return false;
-      const res = await request("POST", "/api/update", { when: "next-start" });
+      const body = { when: "next-start", ...(version ? { version: String(version) } : {}) };
+      const res = await request("POST", "/api/update", body);
       return res.reached && res.status === 202;
     },
     armedVersion,

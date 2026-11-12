@@ -487,7 +487,7 @@ function createManagedLane({
     emit("downloaded", downloadedPayload(version));
     if (gatewayArm) {
       try {
-        const told = await gatewayArm.arm();
+        const told = await gatewayArm.arm(version);
         log.info(told ? "[update] the running gateway recorded the arm" : "[update] no running gateway recorded the arm - main holds it");
       } catch (err) {
         log.info(`[update] telling the gateway about the arm failed: ${(err && err.message) || err}`);

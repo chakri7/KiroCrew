@@ -22,6 +22,7 @@ from aiohttp import web
 from kiro_crew import (
     platform_compat,
     shutdown_event,
+    update_boot_apply,
     update_next_start,
     update_ownership,
 )
@@ -49,6 +50,13 @@ logger = logging.getLogger("kiro_crew.dashboard.handlers.updates")
 #: ``POST /api/update`` bodies: arm the update for the next start, or disarm it.
 WHEN_NEXT_START = "next-start"
 WHEN_CANCEL = "cancel"
+
+#: How long an arm waits for the update check it finds missing. The check is the
+#: shared shielded task, so a wait that gives up leaves it running.
+_ARM_CHECK_TIMEOUT_SECS = 30.0
+
+#: Longest version string an arm request may name.
+_VERSION_MAX_CHARS = 64
 
 
 async def _resolve_restart_target(
@@ -325,28 +333,33 @@ def _quiescence_of(state: DashboardState, *, quiet_window_secs: float) -> Any:
         return None
 
 
-async def _read_update_when(request: web.Request) -> str | web.Response:
-    """The request's ``{"when": "next-start" | "cancel"}``, or a 400 for any other body.
+async def _read_update_request(request: web.Request) -> tuple[str, str] | web.Response:
+    """The request's ``(when, version)``, or a 400 for any other body.
 
-    No body, ``{}`` and a body without ``when`` all mean ``next-start``. A legacy
-    ``force`` key is accepted and ignored: nothing the update does depends on it.
+    ``when`` is ``"next-start"`` or ``"cancel"``: no body, ``{}`` and a body without
+    ``when`` all mean ``next-start``. ``version`` is the release a desktop app
+    names when it arms an update this gateway cannot see (``""`` when absent). A
+    legacy ``force`` key is accepted and ignored: nothing the update does depends
+    on it.
     """
     if getattr(request, "can_read_body", False) is not True:
-        return WHEN_NEXT_START
+        return WHEN_NEXT_START, ""
     try:
         body = await request.json()
     except ValueError:
         body = None
+    invalid = web.json_response(
+        {"error": "invalid request body", "code": "invalid_body"}, status=400
+    )
     if not isinstance(body, dict):
-        return web.json_response(
-            {"error": "invalid request body", "code": "invalid_body"}, status=400
-        )
+        return invalid
     when = body.get("when", WHEN_NEXT_START)
     if when not in (WHEN_NEXT_START, WHEN_CANCEL):
-        return web.json_response(
-            {"error": "invalid request body", "code": "invalid_body"}, status=400
-        )
-    return str(when)
+        return invalid
+    version = body.get("version", "")
+    if not isinstance(version, str) or len(version) > _VERSION_MAX_CHARS:
+        return invalid
+    return str(when), version.strip()
 
 
 async def api_update_apply(request: web.Request) -> web.Response:
@@ -368,17 +381,20 @@ async def api_update_apply(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "The gateway is shutting down", "code": "shutting_down"}, status=503
         )
-    when = await _read_update_when(request)
-    if isinstance(when, web.Response):
-        return when
+    parsed = await _read_update_request(request)
+    if isinstance(parsed, web.Response):
+        return parsed
+    when, named_version = parsed
     if when == WHEN_CANCEL:
         removed = await asyncio.to_thread(update_next_start.disarm)
         state.push_refresh("update_available")
         return web.json_response({"ok": True, "armed": False, "disarmed": removed})
 
+    from kiro_crew.dashboard.handlers.updates_check import _do_update_check
     from kiro_crew.dashboard.handlers.updates_verdict import _update_info
     from kiro_crew.platform import update_provider
     from kiro_crew.platform.update_capability import (
+        CHECK_FAILED,
         CHECK_SUCCEEDED,
         MANAGED_BY_ELECTRON,
         MANAGED_BY_GIT,
@@ -401,13 +417,54 @@ async def api_update_apply(request: web.Request) -> web.Response:
                 status=409,
             )
 
-    if _update_info.get("check_status") == CHECK_SUCCEEDED and not _update_info.get(
-        "update_available"
-    ):
+    # The desktop app owns its own update feed and apply (this gateway often cannot
+    # see the release at all), so a gateway it hosts records the version it names.
+    if named_version and update_boot_apply.hosted_by_desktop():
+        armed = await asyncio.to_thread(update_next_start.arm, named_version)
+        state.push_refresh("update_available")
+        return web.json_response(
+            {"ok": True, "armed": True, "version": armed.armed_version}, status=202
+        )
+
+    # An arm names the version the person was offered, so it needs a verdict. Right
+    # after the gateway starts there is none yet: run the shared check and wait for
+    # it, bounded, rather than record an arm the next start would consume empty.
+    if _update_info.get("check_status") != CHECK_SUCCEEDED:
+        try:
+            await asyncio.wait_for(_do_update_check(), timeout=_ARM_CHECK_TIMEOUT_SECS)
+        except asyncio.TimeoutError:
+            logger.info(
+                "Update check still running after %.0fs; nothing armed", _ARM_CHECK_TIMEOUT_SECS
+            )
+        if _update_info.get("check_status") == CHECK_FAILED:
+            return web.json_response(
+                {
+                    "error": "the update check failed, so nothing was armed: try again",
+                    "code": "arm_check_failed",
+                },
+                status=409,
+            )
+        if _update_info.get("check_status") != CHECK_SUCCEEDED:
+            return web.json_response(
+                {
+                    "error": "The update check has not finished, so nothing was armed: try again",
+                    "code": "update_check_pending",
+                },
+                status=409,
+            )
+    if not _update_info.get("update_available"):
         return web.json_response(
             {"error": "There is no newer version to install", "code": "no_update"}, status=409
         )
     version = str(_update_info.get("latest_version") or "")
+    if not version:
+        return web.json_response(
+            {
+                "error": "The update check named no version, so nothing was armed",
+                "code": "update_check_pending",
+            },
+            status=409,
+        )
     behind = _update_info.get("commits_behind")
     armed = await asyncio.to_thread(
         lambda: update_next_start.arm(version, behind=behind if isinstance(behind, int) else 0)

@@ -157,6 +157,17 @@ test("D-a: the gateway client posts S1 and reads update_armed_version", async ()
   assert.strictEqual(await none.armedVersion(), null);
 });
 
+test("D-a: the arm names the version main armed", async () => {
+  const bodies = [];
+  const fetchImpl = async (url, init) => {
+    if (init.method === "POST") bodies.push(init.body);
+    return { status: init.method === "POST" ? 202 : 200, json: async () => ({ update_armed_version: null }) };
+  };
+  const c = createGatewayArm({ backendUrl: "http://127.0.0.1:1", fetchGatewayAuth: async () => ({ value: "tok" }), fetchImpl });
+  assert.strictEqual(await c.arm("2.0.0"), true);
+  assert.deepStrictEqual(bodies, [JSON.stringify({ when: "next-start", version: "2.0.0" })]);
+});
+
 // A gateway older than the arm contract applies and restarts on POST /api/update
 // {when: "next-start"}, so the arm is sent only to one whose status proves it
 // speaks the contract: the update_armed_version key is present (null when idle).

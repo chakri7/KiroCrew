@@ -9,6 +9,7 @@ process and the re-exec replaced by recording stand-ins.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from unittest.mock import patch
 
@@ -96,6 +97,30 @@ def test_a_gateway_the_desktop_hosts_leaves_the_apply_to_the_desktop(calls, monk
 
     assert calls.child == 0 and calls.execs == []
     assert update_next_start.read().armed is True
+
+
+def test_a_desktop_hosted_gateway_clears_an_arm_the_desktop_already_applied(
+    calls, monkeypatch
+) -> None:
+    monkeypatch.setenv(update_boot_apply.DESKTOP_HOSTED_ENV, "1")
+    update_next_start.arm("1.0.0")
+
+    assert _boot() is False
+
+    assert calls.child == 0 and calls.execs == []
+    assert update_next_start.read().armed is False
+
+
+def test_an_arm_that_names_no_version_is_dropped_at_boot(calls) -> None:
+    update_next_start._state_path().write_text(
+        json.dumps({"armed_version": "", "armed_at": 1.0, "attempts": 0})
+    )
+    assert update_next_start.read().armed is True
+
+    assert _boot() is False
+
+    assert calls.child == 0 and calls.execs == []
+    assert update_next_start.read().armed is False
 
 
 def test_an_armed_version_that_already_runs_is_cleared_without_applying(calls) -> None:

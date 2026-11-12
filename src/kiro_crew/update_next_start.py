@@ -117,12 +117,18 @@ def _write(state: NextStartState) -> None:
 
 
 def arm(version: str, *, behind: int = 0) -> NextStartState:
-    """Arm the update to *version* (``""`` when the newest is not known yet).
+    """Arm the update to *version*, which must name a release.
+
+    A blank *version* raises ``ValueError``: an arm without one is consumed by the
+    next start without installing anything, and shows as armed until then.
 
     *behind* is the git checkout's commit distance behind its upstream (``0`` on
     every other route). Re-arming the same version keeps its first ``armed_at``.
     Arming clears the last apply's error: the person asked again.
     """
+    version = version.strip()
+    if not version:
+        raise ValueError("an armed update needs a version")
     behind = max(0, behind)
     with _lock:
         old = read()
@@ -216,6 +222,7 @@ def status_fields() -> dict[str, object]:
     state = read()
     return {
         "update_armed_version": state.armed_version if state.armed else None,
+        "update_armed_at": state.armed_at if state.armed else None,
         "pending_apply_error": state.pending_apply_error or None,
     }
 
