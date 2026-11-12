@@ -1,22 +1,23 @@
 """``session/load`` end to end.
 
-Resuming a prior session on this runtime, and waiting for its managed MCP servers.
+Resuming a prior session on this runtime, parking it in the host's start agent first when
+a person waits on the re-open, and waiting for its managed MCP servers.
 
 Each function here whose first parameter is ``self`` is an ``AcpRuntime`` method: the class
 binds it by name, so it reads and writes the runtime's own state on the instance, and a patch
 of the method on the class or on an instance reaches every caller.
 
-Instance fields written: ``_load_replay_frames``, ``_session_cwds``, ``_session_inits_in_flight``,
-``_session_queues``.
+Instance fields written: ``_load_replay_frames``, ``_parked_copies``, ``_session_cwds``,
+``_session_inits_in_flight``, ``_session_queues``.
 
 Instance fields read: ``_acp_backend``, ``_agent``, ``_agent_capabilities``,
 ``_can_load_session``, ``_crew_agent``, ``_expect_mcp_reports``, ``_fold_mcp_frame``,
 ``_initialized``, ``_kas_telemetry_sent``,
-``_mcp_gateway_overlay``, ``_open_mcp_report``, ``_pid``, ``_pool_lookup``,
-``_refuse_over_ceiling_start``,
+``_mcp_gateway_overlay``, ``_open_mcp_report``, ``_park_in_start_agent``, ``_pid``,
+``_pool_lookup``, ``_refuse_over_ceiling_start``,
 ``_remote_session_servers``, ``_remote_workspace_agents``, ``_session_label_elements``,
 ``_wire_mode_id``, ``_work_dir``,
-``_write_remote_token``.
+``_write_remote_token``, ``can_release``, ``release_session``.
 """
 
 from __future__ import annotations
@@ -31,12 +32,13 @@ from kiro_crew.acp import batch_guard, kas_cli_settings, kas_env_launch
 from kiro_crew.acp._dispatch import attach_kas_custom_agents, parse_session_modes
 from kiro_crew.acp.kas_agents import hoist_servers_for_session
 from kiro_crew.acp.kas_settings_mcp import without_excluded_stubs
+from kiro_crew.acp.kas_start_agent import START_AGENT_ID, parking_load
 from kiro_crew.acp.mcp_session_report import (
     active_custom_agent,
     required_managed_servers,
     roster_names,
 )
-from kiro_crew.acp.mcp_start_wait import first_prompt_brief_wait
+from kiro_crew.acp.mcp_start_wait import first_prompt_brief_wait, person_waits
 from kiro_crew.acp.runtime_session_setup import (
     _disable_check_scope,
     _drop_withdrawn_stubs,
@@ -56,6 +58,7 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKENDS_ADVERTISED_MODEL_SELECTION,
     METHOD_SESSION_LOAD,
+    METHOD_SET_MODE,
     JsonRpcMessage,
 )
 from kiro_crew.agent_files import kas_wire_agent_id
@@ -82,6 +85,7 @@ async def load_session(
     channel_id: str = "",
     require_replay: bool = False,
     start_priority: StartPriority = StartPriority.BACKGROUND,
+    focus_resume: bool = False,
 ) -> AcpSessionHandle:
     """Resume a prior session via session/load — mirrors AcpClient.
 
@@ -118,6 +122,13 @@ async def load_session(
     ``_meta.kiro.replay: true``. A load with none is evicted (the stored record
     is kept) and raised, so the caller starts a fresh session and replays Kiro
     Crew's own transcript.
+
+    ``start_priority`` and ``focus_resume`` say whether a person is waiting on
+    this re-open (``mcp_start_wait.person_waits``). When one is, and the host
+    can park a stored session in its start agent, the load is preceded by
+    :func:`_park_in_start_agent`, so Kiro Crew's servers connect ahead of the
+    agent's own and the first prompt does not wait behind them. Every other
+    resume sends the one load it always sent.
     """
     if not self._initialized:
         raise AcpRuntimeError("Runtime not initialized — call spawn() first")
@@ -304,6 +315,9 @@ async def load_session(
     payload_snapshot = None
     request_identity = ""
     withheld_notice = ""
+    # The load that parks the session in the host's start agent first, when a
+    # person waits on this re-open; ``None`` on every other resume and host.
+    parking: dict[str, Any] | None = None
     if self._acp_backend == ACP_BACKEND_KAS:
         kas_extras = await self._kas_custom_agents(
             active_agent,
@@ -376,7 +390,21 @@ async def load_session(
             agent,
             agent_capabilities=self._agent_capabilities,
         )
+        if resume_sid in self._parked_copies:
+            # A re-open on this process was cut off before the engine confirmed
+            # freeing the copy it parked. The engine ignores the batch of a load
+            # for a session it holds, and that copy's agent declares no server.
+            raise AcpRuntimeError(
+                f"session/load of {resume_sid}: this process still holds the copy "
+                "loaded to park it in the start agent"
+            )
+        # Only where the engine can free a session and keep its record: the
+        # parked copy must be gone before the load below.
+        if person_waits(start_priority, focus_resume=focus_resume) and self.can_release():
+            parking = parking_load(load_params)
     budget = await self._session_start_budget()
+    if parking is not None:
+        await self._park_in_start_agent(resume_sid, parking, budget)
     self._session_inits_in_flight += 1
     loaded_session_id = ""
     if require_replay:
@@ -525,6 +553,18 @@ async def load_session(
     # Same routing-table question as create_session: a host with no agent
     # spec has no mode to resume onto either.
     mode_agent = agent if self._activates_agent_by_mode() else None
+    _ids, _resumed_in, _adv = parse_session_modes(resp)
+    if (
+        mode_agent is None
+        and kas_agents
+        and self._activates_agent_by_mode()
+        and not self._harness.start_mode_ran_servers(_resumed_in or "")
+    ):
+        # The session came back in the host's server-less start agent (a re-open
+        # that parked it there, finished or cut off). No prompt runs in that
+        # agent, so the session's own is activated even with no override, as
+        # create_session activates an injected default.
+        mode_agent = self._agent
     # Guard (C) -- see create_session: advertised, but as the host's own.
     # Same wire id as create_session: the batch this load re-sent was renamed.
     mode_wire = (
@@ -559,10 +599,13 @@ async def load_session(
         handle.active_agent = mode_agent
         await self._served_default_after_mode(handle, resume_sid)
         # See create_session: after a real mode switch, registration frames
-        # staged during session/load describe the pre-switch roster.
+        # staged during session/load describe the pre-switch roster, unless
+        # that mode was the host's server-less start agent.
         _ids, _current, _adv = parse_session_modes(resp)
-        mode_switched = mode_wire != _current and (
-            bool(_current) or self._harness.notification_aliases.mcp_readiness
+        mode_switched = (
+            mode_wire != _current
+            and (bool(_current) or self._harness.notification_aliases.mcp_readiness)
+            and self._harness.start_mode_ran_servers(_current or "")
         )
         if mode_switched:
             # See create_session: those frames were the previous agent's roster.
@@ -595,6 +638,7 @@ async def load_session(
             budget,
             staged_before_switch if mode_switched else 0,
             start_priority,
+            focus_resume=focus_resume,
         )
     elif self._expect_mcp_reports:
         await handle.drain_init(stale_report_frames=staged_before_switch if mode_switched else 0)
@@ -618,6 +662,79 @@ async def load_session(
 
     logger.info("Resumed session %s on runtime PID %d", resume_sid, self._pid or 0)
     return handle
+
+
+async def _park_in_start_agent(
+    self: AcpRuntime, session_id: str, params: dict[str, Any], timeout: float
+) -> None:
+    """Make the stored session *session_id* come back in the host's start agent.
+
+    Three requests, none of which starts an MCP server: ``session/load`` with
+    *params* (``kas_start_agent.parking_load``: the session's own agent without
+    its servers, no session-level server), ``session/set_mode`` to the start
+    agent, which is what the engine stores, and the release that frees the
+    resident copy and keeps the record. The caller's own ``session/load`` then
+    resumes in the start agent.
+
+    A load that fails here raises as the caller's own would, so the provider's
+    retry and fresh-session paths see one failure, not two. A load the engine
+    answered with an error loaded nothing, so nothing is held and the id is not
+    listed: the provider's retry past a stale session lock loads it again. A
+    load with no answer, or one too large to read, may still be held. A ``set_mode`` that
+    fails leaves the stored mode as it was and the caller's load takes the
+    order it always took. A copy the engine did not confirm freeing raises: the
+    engine ignores the batch of a load for a session it still holds, and the
+    held copy's agent declares no server.
+
+    No session queue is registered for the id while this runs, so the turns the
+    engine replays are dropped by the reader, as they are during any load.
+    """
+    started = time.monotonic()
+    parked = False
+    # Held by the engine from the request below until its release is confirmed;
+    # load_session refuses the id on this process for as long as it is listed.
+    self._parked_copies.add(session_id)
+    held = True
+    try:
+        try:
+            resp = await self._send_and_await(METHOD_SESSION_LOAD, params, timeout=timeout)
+        except (AcpRequestTimeout, AcpFrameTooLarge):
+            raise
+        except AcpRuntimeError:
+            # The engine's own answer: it did not load the session.
+            held = False
+            raise
+        ids, current, _adv = parse_session_modes(resp)
+        parked = current == START_AGENT_ID
+        if not parked and START_AGENT_ID in ids:
+            try:
+                await self._send_and_await(
+                    METHOD_SET_MODE,
+                    {"sessionId": session_id, "modeId": START_AGENT_ID},
+                    timeout=timeout,
+                )
+                parked = True
+            except Exception:
+                logger.warning(
+                    "session %s: could not park it in the start agent; "
+                    "its MCP servers connect in the stored order",
+                    session_id,
+                    exc_info=True,
+                )
+    finally:
+        if not held or await self.release_session(session_id):
+            self._parked_copies.discard(session_id)
+    if session_id in self._parked_copies:
+        raise AcpRuntimeError(
+            f"session/load of {session_id}: the copy loaded to park it in the start "
+            "agent could not be freed"
+        )
+    logger.info(
+        "session %s: %s for its re-open in %.0f ms",
+        session_id,
+        "parked in the start agent" if parked else "left in its stored mode",
+        (time.monotonic() - started) * 1000,
+    )
 
 
 def _declared_governed() -> bool:
@@ -650,6 +767,8 @@ async def _wait_managed_mcp(
     timeout: float,
     stale_report_frames: int,
     start_priority: StartPriority = StartPriority.BACKGROUND,
+    *,
+    focus_resume: bool = False,
 ) -> None:
     # *params* carries the batch as sent, so its entry is keyed by the wire id.
     wire_agent = kas_wire_agent_id(agent)
@@ -686,7 +805,9 @@ async def _wait_managed_mcp(
         # Best effort, never required: a slow or dead one must not block the start.
         # Which servers, and why not the user's own when a person is waiting:
         # ``first_prompt_brief_wait``.
-        brief = first_prompt_brief_wait(params, wire_agent, required, start_priority)
+        brief = first_prompt_brief_wait(
+            params, wire_agent, required, start_priority, focus_resume=focus_resume
+        )
         if brief:
             await handle.wait_mounted_mcp(brief, MOUNTED_MCP_WAIT_SECS)
     except BaseException:
