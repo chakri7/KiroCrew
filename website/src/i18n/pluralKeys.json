@@ -546,5 +546,10 @@
   "pages.schedulePage.batchActions.run_confirm_title",
   "pages.developer.agentBackendTab.card_summary_safety_notes",
   "components.publishHub.expiry_after_days",
-  "components.publicPublishAckModal.exposure_window_provider_expiry"
+  "components.publicPublishAckModal.exposure_window_provider_expiry",
+  "pages.settings.releases.earlier_count",
+  "pages.settings.releases.show_more",
+  "pages.settings.aboutPanel.what_you_d_get",
+  "pages.settings.aboutPanel.what_you_d_get_more",
+  "pages.settings.aboutPanel.what_you_d_get_in_version"
 ]

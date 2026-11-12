@@ -438,7 +438,7 @@ describe('Decisions (Jev) preview card', () => {
     })
   })
 
-  it('links to the Releases page when the gateway lists no points', async () => {
+  it('links to the About page, where updates live, when the gateway lists no points', async () => {
     // An older gateway projects no rows. The notice tells the reader to update, so
     // the place it names is a link there, not plain text.
     stubGateway(consentOf(true, { points: [] }))
@@ -446,8 +446,8 @@ describe('Decisions (Jev) preview card', () => {
     await waitFor(() => {
       expect(screen.getByText(/does not list what Jev decides yet/i)).toBeInTheDocument()
     })
-    const link = screen.getByRole('link', { name: 'Settings › Releases' })
-    expect(link.getAttribute('href')).toBe('/settings/releases')
+    const link = screen.getByRole('link', { name: 'Settings › About' })
+    expect(link.getAttribute('href')).toBe('/settings/about')
   })
 
   it('says where Auto (Jev) is chosen for the model.route point', async () => {
@@ -722,7 +722,7 @@ describe('Decisions (Jev) preview card', () => {
     // than a row at 40%, which is the fade "just missing".
     expect(screen.getByText(/sent over the internet to Jev/i).className).toContain('opacity-40')
     // And the notice says WHERE to act, not just that something must be updated.
-    expect(screen.getByText(/Settings › Releases/)).toBeInTheDocument()
+    expect(screen.getByText(/Settings › About/)).toBeInTheDocument()
   })
 
   it('offers the sampling share as a slider, and says what the current one means', async () => {
