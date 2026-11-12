@@ -1391,9 +1391,11 @@ read or replaced, the line is written without the field.
 turn is contextual. A keyed warm provider session (`is_new_session=False`) carries
 native conversation history even when this turn emits no Kiro Crew context block,
 and a cold `session/load` resume carries restored native history when
-`resumed=True`. Both paths mint `[REPLY FORMAT RULES]` (when interactive) and the
-`[CURRENT USER REQUEST …]` header before the current turn so the user's text owns
-EOF. Only a standalone call with no session key, no restored/native history, and
+`resumed=True`. Both paths mint the `[CURRENT USER REQUEST …]` header before the
+current turn so the user's text owns EOF, and `[REPLY FORMAT RULES]` ahead of it
+when the session is interactive and its engine conversation does not already hold
+the current rules (`delivery_records._reply_format_due`).
+Only a standalone call with no session key, no restored/native history, and
 no injected blocks preserves the legacy raw-user-text-first shape with guidance
 trailing; it has no older provider topic from which to regress.
 

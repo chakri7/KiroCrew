@@ -289,12 +289,27 @@ it adds:
 | `[CURRENT USER] <name>` | the sender's display name (for example WeCom `allowed_users[].name`) | a channel turn that carries a display name |
 | `[Task checklist — automatic recovery]` | `todo_recovery_prompt`, prepended to the message by `dashboard/chat_turn/prompt_assembly.py`; task text inside the untrusted TODO fence | a cold start without provider history, or a recovery still pending; it settles on the provider's first event |
 | `[Task checklist — person edited]` | `todo_sync_prompt`, prepended the same way | a warm turn with person edits not yet stated to the agent; marked stated on the provider's first event |
-| `[REPLY FORMAT RULES]` + guidance | `_interactive_guidance` | interactive sessions |
+| `[REPLY FORMAT RULES]` + guidance | `_interactive_guidance`, gated by `delivery_records._reply_format_due` | interactive sessions: the first message of an engine session (new, resumed or reloaded), the first turn after a compaction, when the rules' text differs from what the session last received, and until a landed turn has delivered them |
 | `[CURRENT USER REQUEST …]` + the user's text | the turn | always last |
 
 The guidance paragraphs sit **before** the request header on purpose: trailing
 them displaced the request from the prompt's recency edge and the model regressed
 to an older question.
+
+**The reply-format rules are sent once per engine conversation.** The engine
+replays its own history, so a copy on every message only grows the context. One
+owner decides, `delivery_records._reply_format_due`, from a digest of the block
+kept per session key. A build records what it carries as pending, and the
+turn-end settle every turn engine already calls decides it: `commit_skill_bodies`
+(the turn landed) marks the block received, `rollback_skill_bodies` drops it. So
+a prompt that never reached the engine, a caller that never settles, an evicted
+record and a call with no session key all send the block again; no path leaves a
+session without it. The owner is asked on every build, so a turn that carries no
+block (a cron turn in the same chat, which is not interactive) still drops the
+record when it is the one that consumes a compaction or starts the engine
+session. The marker scrub (`_neutralize_reply_format_markers`) is not
+part of that decision: it runs over the assembled prefix on every message, with
+or without the block, so nothing else can mint the header.
 
 ### Trigger-matched skills
 

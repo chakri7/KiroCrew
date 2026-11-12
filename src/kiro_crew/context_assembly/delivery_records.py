@@ -9,7 +9,9 @@ Two bounded, oldest-evicted records the builder keeps per session key, both keye
   ``store_admission.turn_lessons_block``;
 * the trigger-matched skill bodies a session was sent, with the per-turn undo record
   that ``rollback_skill_bodies`` and ``commit_skill_bodies`` settle once the turn's fate
-  is known.
+  is known;
+* the reply-format rules a session's engine conversation holds
+  (``_reply_format_due``), settled by the same two calls.
 
 The sub-agent notices a channel turn's build reads from its conversation's dashboard
 tab ride the same per-turn settle, but their settle call goes to the turn that built,
@@ -17,7 +19,8 @@ never into a record here: another turn on the session cannot take it.
 
 Builder state read and written: ``_lessons_shown`` and ``_lessons_shown_lock``;
 ``_sent_skill_bodies``, ``_sent_skill_agents``, ``_sent_skill_bodies_undo`` and
-``_sent_skill_bodies_lock``; ``tab_notices_for_session`` is read; the bounds ``_SENT_SKILL_BODY_SESSIONS`` and ``_SENT_SKILL_BODY_ENTRIES`` are read
+``_sent_skill_bodies_lock``; ``_reply_format_sent``, ``_reply_format_pending`` and
+``_reply_format_lock``; ``tab_notices_for_session`` is read; the bounds ``_SENT_SKILL_BODY_SESSIONS`` and ``_SENT_SKILL_BODY_ENTRIES`` are read
 through the builder, so an instance override applies.
 
 New per-session delivery records belong here.
@@ -25,6 +28,7 @@ New per-session delivery records belong here.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -258,6 +262,10 @@ def rollback_skill_bodies(self, session_key: str | None) -> None:
     if not session_key:
         return
     key = self._cap_memo_key(session_key)
+    with self._reply_format_lock:
+        # The rules this build carried never reached the engine: forget them, so
+        # the next turn still sends the block.
+        self._reply_format_pending.pop(key, None)
     with self._sent_skill_bodies_lock:
         undo = self._sent_skill_bodies_undo.pop(key, None)
         if not undo:
@@ -291,6 +299,61 @@ def commit_skill_bodies(self, session_key: str | None) -> None:
     key = self._cap_memo_key(session_key)
     with self._sent_skill_bodies_lock:
         self._sent_skill_bodies_undo.pop(key, None)
+    with self._reply_format_lock:
+        delivered = self._reply_format_pending.pop(key, None)
+        if delivered is not None:
+            # The engine conversation now holds this block.
+            self._reply_format_sent.pop(key, None)
+            self._reply_format_sent[key] = delivered
+            while len(self._reply_format_sent) > self._SENT_SKILL_BODY_SESSIONS:
+                self._reply_format_sent.popitem(last=False)
+
+
+def _reply_format_due(self, session_key: str | None, rules: str, *, reset: bool) -> bool:
+    """Whether this turn's message carries the reply-format rules block.
+
+    The engine replays its own conversation, so rules it already holds add
+    nothing but context when they ride every message. The block is due:
+
+    * on the first message of an engine session, new, resumed or reloaded, and on
+      the first turn after a compaction (*reset* for both: the window may no
+      longer hold it);
+    * when *rules* differs from the block this session last received;
+    * when nothing shows the session received it.
+
+    Only a turn that LANDED counts as received. A build writes what it carries to
+    ``_reply_format_pending`` and the turn-end settle decides: ``commit_skill_bodies``
+    promotes it, ``rollback_skill_bodies`` drops it. So a prompt that never reached
+    the engine, and a caller that never settles, keep the block on the next
+    message. A missing *session_key* keeps no record and is always due. Every
+    failure sends the block again; none leaves a session without it.
+
+    Called on every build, with ``""`` for a turn that carries no marked block (a
+    non-interactive turn, or one whose guidance trails the text unmarked). Such a
+    turn is never due and delivers nothing, but its *reset* still drops the
+    record: a compaction a cron turn consumed has emptied the window for the
+    person's next message too.
+
+    The record is per session key, bounded oldest first, and ends with the
+    session: the next engine session under the key starts with *reset*.
+    """
+    if not session_key:
+        return bool(rules)
+    key = self._cap_memo_key(session_key)
+    digest = hashlib.sha256(rules.encode("utf-8")).hexdigest()
+    with self._reply_format_lock:
+        if reset:
+            self._reply_format_sent.pop(key, None)
+        self._reply_format_pending.pop(key, None)
+        if not rules:
+            return False
+        if self._reply_format_sent.get(key) == digest:
+            self._reply_format_sent.move_to_end(key)
+            return False
+        self._reply_format_pending[key] = digest
+        while len(self._reply_format_pending) > self._SENT_SKILL_BODY_SESSIONS:
+            self._reply_format_pending.popitem(last=False)
+        return True
 
 
 def _read_tab_notices(self, session_key: str | None, settles: list[Callable[[bool], None]]) -> str:

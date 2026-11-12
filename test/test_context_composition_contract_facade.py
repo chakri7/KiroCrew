@@ -231,6 +231,10 @@ _BUILDER_MEMBERS: dict[str, tuple[str, str]] = {
         "(self, session_key: 'str | None', settles: 'list[Callable[[bool], None]]') -> 'str'",
     ),
     "_remember_startup_lessons": ("method", "(self, session_key: 'str', block: 'str') -> 'None'"),
+    "_reply_format_due": (
+        "method",
+        "(self, session_key: 'str | None', rules: 'str', *, reset: 'bool') -> 'bool'",
+    ),
     "_resolve_agent_prompt": (
         "method",
         "(self, agent: 'str | None', *, project: 'str | None', mode: 'str', session_key: 'str | None', is_cc: 'bool', private_owner: 'bool', session_start: 'bool') -> 'str'",

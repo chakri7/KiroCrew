@@ -66,6 +66,7 @@ _MEMBERS: dict[str, tuple[str, bool, str]] = {
     "_live_shown_lessons": ("function", False, "delivery_records"),
     "_read_tab_notices": ("function", False, "delivery_records"),
     "_remember_startup_lessons": ("function", False, "delivery_records"),
+    "_reply_format_due": ("function", False, "delivery_records"),
     "_turn_lessons_block": ("function", False, "delivery_records"),
     "commit_skill_bodies": ("function", False, "delivery_records"),
     "rollback_skill_bodies": ("function", False, "delivery_records"),

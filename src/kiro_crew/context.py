@@ -1571,6 +1571,16 @@ class ContextBuilder:
         # the entry did not exist before this build (rollback removes it).
         self._sent_skill_bodies_undo: dict[str, dict[str, str | None]] = {}
         self._sent_skill_bodies_lock = threading.Lock()
+        # The reply-format rules each session's engine conversation holds, as a
+        # digest of the block: session_key digest -> sha256. `_reply_format_sent`
+        # is what a LANDED turn delivered, and only it lets a later turn leave the
+        # block out. `_reply_format_pending` is what the build in flight carries,
+        # promoted or dropped by the same turn-end settle the skill bodies use.
+        # Both are bounded by `_SENT_SKILL_BODY_SESSIONS`, oldest first; a missing
+        # record sends the block. See `delivery_records._reply_format_due`.
+        self._reply_format_sent: OrderedDict[str, str] = OrderedDict()
+        self._reply_format_pending: OrderedDict[str, str] = OrderedDict()
+        self._reply_format_lock = threading.Lock()
         if bot_name:
             self._bot_name = bot_name
         else:
@@ -1590,6 +1600,7 @@ class ContextBuilder:
     _dedup_triggered_bodies = _delivery_records._dedup_triggered_bodies
     rollback_skill_bodies = _delivery_records.rollback_skill_bodies
     commit_skill_bodies = _delivery_records.commit_skill_bodies
+    _reply_format_due = _delivery_records._reply_format_due
     _read_tab_notices = _delivery_records._read_tab_notices
     # ── The agent spec and prompt (context_assembly/agent_spec.py) ──
     _substitute_bot_name = _agent_spec._substitute_bot_name

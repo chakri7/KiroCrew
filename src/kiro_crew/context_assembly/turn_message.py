@@ -962,6 +962,16 @@ def build_message(
     # Only a call with no session key keeps the user-text-first order.
     _has_native_history = bool(session_key and (resumed or not is_new_session))
     _guidance_precedes_request = bool(parts) or _has_native_history
+    # The marked rules block rides the message only while the engine conversation
+    # does not hold it: its first message, a compaction, or changed rules. Asked on
+    # EVERY build, so a turn that carries no block (a non-interactive one, or one
+    # whose guidance trails unmarked) still drops a record its lifecycle
+    # invalidates. The marker scrub below is not part of this decision.
+    _rules_due = self._reply_format_due(
+        skill_bodies_session,
+        "".join(_interactive_guidance) if _guidance_precedes_request else "",
+        reset=is_new_session or needs_reinjection or conversation_reset,
+    )
 
     # The actual message (possibly modified by transform hook)
     if _guidance_precedes_request:
@@ -992,7 +1002,7 @@ def build_message(
         # non-interactive automation and markers split across adjacent
         # sources are covered without relying on per-call-site memory.
         parts[:] = [ctx._neutralize_reply_format_markers("".join(parts))]
-        if _guidance_precedes_request and _interactive_guidance:
+        if _rules_due:
             parts.append(ctx._REPLY_FORMAT_RULES_MARKER + "\n")
             parts.extend(_interactive_guidance)
         parts.append("[CURRENT USER REQUEST — respond to this]\n")
