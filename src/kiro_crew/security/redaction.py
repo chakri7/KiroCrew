@@ -38,7 +38,7 @@ import posixpath
 import re
 import secrets
 import sys as _sys
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Iterator
 from typing import TYPE_CHECKING, NamedTuple
 
 from kiro_crew.credential_patterns import (  # noqa: F401
@@ -965,6 +965,18 @@ def _credential_redaction_plan(
     return _main_plan(text, defer_token_param, judged_sri_values, token_param_prefixes)
 
 
+def _pass1_matches(text: str) -> Iterator[re.Match[str]]:
+    """Pass 1's matches: every branch, or with the internal switch on those the detectors leave.
+
+    The stream's pass-1 holds read the same matches as the plan.
+    """
+    from kiro_crew.security.redaction_structured import compat
+
+    if compat.use_rule_table():
+        return compat.residual_matches(text)
+    return _credential_matches(text)
+
+
 def _main_plan(
     text: str,
     defer_token_param: bool,
@@ -1002,7 +1014,7 @@ def _pattern_pass(
     # disjoint; it is what the later passes subtract from.
     taken: list[_RedactionSpan] = []
     if _might_contain_credential(text):
-        for m in _credential_matches(text):
+        for m in _pass1_matches(text):
             # Keep the Bearer branch's non-secret prefix (end() is -1 elsewhere).
             start = max(m.start(), m.end("bearer_prefix"))
             # Emit ONLY non-sensitive metadata (length). Do NOT slice any part of

@@ -126,6 +126,16 @@ export const SETTINGS_MANUAL: ManualSettingEntry[] = [
     settingId: 'security.config-pending',
   },
   {
+    // The second switch in the same Redaction section (agent's prompt and logs).
+    id: 'security.redact-credentials-in-the-agent-s-prompt-and-logs',
+    labelKey: 'pages.settings.securityPanel.credential_redaction_seams_toggle',
+    descriptionKey: 'pages.settings.securityPanel.credential_redaction_seams_toggle_help',
+    tab: 'security',
+    type: 'toggle',
+    occurrence: 1,
+    params: { section: 'redaction' },
+  },
+  {
     id: 'security.trust-this-machine-s-tailnet-name',
     labelKey: 'pages.settings.securityPanel.tailnet_title',
     tab: 'security',

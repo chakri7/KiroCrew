@@ -3300,6 +3300,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "Off shows files the dashboard opens for you — the chat side panel's Files tab, and the Library and Artifacts previews — as written, in your own dashboard only. On by default. Conversations in this dashboard, Slack, and messaging channels stay redacted. Changing it reloads the files you have open (unsaved edits are kept) and closes file-comparison (diff) views."
   },
   {
+    "id": "security.redact-credentials-in-the-agent-s-prompt-and-logs",
+    "labelKey": "pages.settings.securityPanel.credential_redaction_seams_toggle",
+    "tab": "security",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "section": "redaction"
+    },
+    "label": "Redact credentials in the agent's prompt and logs",
+    "description": "Off stops the credential check in two places: the earlier conversation replayed into the agent's prompt, so the model receives credential-shaped values, and the gateway's log lines, so those values are written to its log files. On by default. The file-view switch above and this switch do not change each other."
+  },
+  {
     "id": "security.config-pending",
     "labelKey": "pages.settings.securityPanel.configPending.nav_dot",
     "tab": "security",
@@ -3334,6 +3346,16 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "tailnet"
     },
     "label": "Trust this machine's tailnet name"
+  },
+  {
+    "id": "security.use-the-structured-credential-detectors",
+    "label": "Use the structured credential detectors",
+    "labelKey": "pages.settings.securityPanel.credential_redaction_engine_toggle",
+    "description": "Off goes back to the older pattern passes, everywhere.",
+    "hint": "This picks which engine redacts agent output wherever credentials are redacted, not only in files. On by default: the structured detectors keep identifiers such as AWS key IDs, commit SHAs and request IDs readable and still remove secrets. Off runs the older pattern passes alone, which remove those identifiers too. Redaction stays on either way, and the file-view switch above is a separate setting. The gateway uses a change at once; other Kiro Crew processes use it when they next start.",
+    "tab": "security",
+    "type": "toggle",
+    "occurrence": 1
   },
   {
     "id": "security.your-custom-denies",
