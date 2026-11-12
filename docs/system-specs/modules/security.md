@@ -4255,6 +4255,22 @@ preventing a planted `kiro-cli` basename from selecting the provider's trusted
 internal macOS delegation path. The strict wrapper additionally hides the
 configured data home, `~/.kiro/crew`, `~/.kirocrew`, and all known Kiro
 identity stores, so setup probes cannot read Kiro Crew state or bearer tokens.
+
+The Tool Search gate's read of a kiro-cli found only through `PATH`
+(`kiro_cli_path_probe`) is the same shape and follows one rule: **the probe
+never has more reach than the session's own launch of the same file.** `PATH`
+can lead with a directory an agent writes to, so its `--version` runs through
+`sandboxed_spawn_argv(mode="strict")` behind the same system `env` entry (found in
+the fixed system directories, never through `PATH`), with
+the `--version` probe environment above and nothing else, is not run when the
+wrap did not put the child in Kiro Crew's own sandbox (no backend, an
+unsandboxed opt-in, a gateway that itself runs inside a sandbox), and is not
+run on Windows, which has no sandbox backend. It adds no seal and no mask: it
+only calls the chokepoint. Every such case answers "unknown", which keeps
+Kiro Crew's own MCP servers out of deferral. The pinned install and an absolute
+`KIROCREW_KIRO_BIN` keep their existing read outside the sandbox
+(`kiro_cli_version_at`); no file is added to that route.
+
 Trust is "the CLI runs, and it has a valid login": a Kiro CLI that answers
 `--version` is eligible for `whoami`, regardless of install
 source, owner, or fixed path. Kiro Crew is not the authority on where Kiro CLI

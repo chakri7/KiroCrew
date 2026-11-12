@@ -20,8 +20,10 @@ through that wrapper" the finding asks for.
 The agent-influenced sites — the MCP server probe
 (``mcp_discovery.probe_server``), the TaskRunner test command
 (``task_executor.run_tests``), TaskRunner git operations
-(``git_coord._git`` / ``_is_git_repo``), and authenticated source-provider
-fetches (``source_providers._run_json``) — are routed through
+(``git_coord._git`` / ``_is_git_repo``), authenticated source-provider
+fetches (``source_providers._run_json``), and the version read of a kiro-cli
+found only through ``PATH`` (``kiro_cli_path_probe._sandboxed_version``, a file
+an agent may have planted) — are routed through
 ``sandboxed_spawn_argv`` and MUST stay routed (see
 ``test_agent_influenced_sites_are_routed``).
 
@@ -782,6 +784,7 @@ def test_agent_influenced_sites_are_routed():
         "git_coord.py::_git",
         "git_coord.py::_is_git_repo",
         "dashboard/source_providers/runner.py::_run_provider",
+        "kiro_cli_path_probe.py::_sandboxed_version",
     ):
         assert key not in unrouted, (
             f"{key} must route its spawn through sandboxed_spawn_argv "
