@@ -775,7 +775,12 @@ def _url_payload_command(n: int) -> str:
 #: Raised by one, from 35,533, for the ``update_next_start.json`` entry on the
 #: file-tool write fence: the update armed for the next start, which the sandbox
 #: seals read-only too.
-_PACKAGE_LINE_BUDGET = 35_534
+#: Raised by 98, from 35,534, to 35,632, for the target-set build reading each folder
+#: once: ``_child_realpath.realpaths_sharing_folders`` (the batch walk the resolver
+#: child and the in-process build share), the build's shared path spellings in
+#: ``paths_targets._anchor_targets``, and the comment above the expiry saying what one
+#: build observes. Same set, less work. Re-measured.
+_PACKAGE_LINE_BUDGET = 35_632
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
