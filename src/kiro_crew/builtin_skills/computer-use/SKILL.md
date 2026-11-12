@@ -46,8 +46,8 @@ differs:
 - **Windows, own driver**: no per-process input, so a keystroke takes the user's
   keyboard focus and a coordinate click moves their real cursor — the result says
   so; relay it.
-- **Open-source driver** (Linux, Windows, optionally macOS): `sky_click` and
-  `app_post` are not macOS-native here; coordinate clicks run in the background, and
+- **Open-source driver** (Linux, Windows; not offered on macOS yet): `sky_click`
+  and `app_post` do not exist here; coordinate clicks run in the background, and
   `global` is the foreground path. A field whose password status cannot be proven
   is treated as a password field (`<secure>`): you cannot type into it.
 - **Linux**: X11, or apps running under XWayland on a Wayland desktop. Native

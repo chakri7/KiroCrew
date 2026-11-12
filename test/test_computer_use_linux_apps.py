@@ -108,3 +108,88 @@ def test_a_program_missing_from_the_system_path_is_refused() -> None:
         linux_apps.resolve_target(
             "x", catalog=(_entry("X", ("definitely-not-a-real-program-kc",), desktop_id="x"),)
         )
+
+
+def _desktop(path: Path, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"[Desktop Entry]\nType=Application\nName={name}\nExec=/usr/bin/flatpak run {name}\n",
+        encoding="utf-8",
+    )
+
+
+def test_flatpak_symlinked_entries_are_read_only_inside_their_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ownership is what the real check verifies; the layout is what this test pins.
+    monkeypatch.setattr(linux_apps, "_secure_owner", lambda _p: True)
+    flatpak = tmp_path / "flatpak"
+    exports = flatpak / "exports" / "share" / "applications"
+    exports.mkdir(parents=True)
+    inside = flatpak / "app" / "org.example.Inside" / "current" / "active" / "export" / "x.desktop"
+    _desktop(inside, "Inside")
+    (exports / "org.example.Inside.desktop").symlink_to(inside)
+    outside = tmp_path / "elsewhere" / "evil.desktop"
+    _desktop(outside, "Evil")
+    (exports / "org.example.Evil.desktop").symlink_to(outside)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "org.example.Plain.desktop").symlink_to(inside)
+
+    found = linux_apps.installed_apps(
+        dirs=(str(exports), str(plain)), link_roots={str(exports): str(flatpak)}
+    )
+    assert [e.desktop_id for e in found] == ["org.example.Inside"]
+
+
+def test_the_flatpak_export_dir_is_a_symlinked_catalog_dir() -> None:
+    for directory in linux_apps.SYMLINKED_DIR_ROOTS:
+        assert directory in linux_apps.SYSTEM_APPLICATION_DIRS
+
+
+@pytest.mark.parametrize(
+    "argv, key",
+    [
+        (("/usr/bin/gnome-calculator",), "gnome-calculator"),
+        (
+            (
+                "/usr/bin/flatpak",
+                "run",
+                "--branch=stable",
+                "--arch=x86_64",
+                "--command=gnome-calculator",
+                "org.gnome.Calculator",
+            ),
+            "org.gnome.Calculator",
+        ),
+        (
+            ("/usr/bin/env", "BAMF_DESKTOP_FILE_HINT=/x/firefox.desktop", "/snap/bin/firefox"),
+            "firefox",
+        ),
+        (("/usr/bin/snap", "run", "firefox"), "firefox"),
+        (("/usr/bin/env",), "env"),
+    ],
+)
+def test_a_wrapper_launch_is_keyed_by_the_wrapped_app(argv: tuple[str, ...], key: str) -> None:
+    # No window carries the wrapper's name (flatpak, env, snap): keying a launch by
+    # it would miss the running app and wait out the whole launch timeout.
+    assert linux_apps.launch_key(argv) == key
+    assert linux_apps.target_identity("\0".join(argv), "App").key == key
+
+
+def test_the_flatpak_app_id_is_read_from_the_process_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    info = tmp_path / ".flatpak-info"
+    info.write_text("[Application]\nname=org.gnome.Calculator\nruntime=x\n[Instance]\nname=nope\n")
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == "/proc/42/root/.flatpak-info":
+            return real_open(info, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert linux_apps.flatpak_app_id(42) == "org.gnome.Calculator"
+    assert linux_apps.flatpak_app_id(0) == ""
+    assert linux_apps.flatpak_app_id(999_999_999) == ""

@@ -94,7 +94,9 @@ describe('computerUseSetup', () => {
 
   it('falls back to the platform walk when the document carries no steps', () => {
     expect(stepsFor(setupDoc('error', { platform: 'linux' })).map(s => s.id)).toEqual(['install', 'session', 'verify', 'ready'])
-    expect(stepsFor(setupDoc('error')).map(s => s.id)).toEqual(['install', 'accessibility', 'screen_recording', 'verify', 'ready'])
+    expect(stepsFor(setupDoc('error')).map(s => s.id)).toEqual(['install', 'session', 'verify', 'ready'])
+    // macOS walks the built-in driver's check only: no install step.
+    expect(stepsFor(setupDoc('error', { platform: 'macos', driver: { kind: 'native' } })).map(s => s.id)).toEqual(['verify', 'ready'])
   })
 
   it('points a revoked or waiting state at the missing grant', () => {
@@ -109,6 +111,9 @@ describe('computerUseSetup', () => {
     expect(readinessFor(setupDoc('disabled'))).toBe('off')
     expect(readinessFor(setupDoc('ready'))).toBe('ready')
     expect(readinessFor(setupDoc('unsupported'))).toBe('unavailable')
+    // The open-source driver chosen on a Mac: the Mac works, the choice needs changing.
+    expect(readinessFor(setupDoc('unsupported', { platform: 'macos', driver: { kind: 'upstream' } }))).toBe('attention')
+    expect(readinessFor(setupDoc('unsupported', { platform: 'macos', driver: { kind: 'native' } }))).toBe('unavailable')
     expect(readinessFor(setupDoc('permission_revoked'))).toBe('attention')
     expect(readinessFor(setupDoc('requesting_accessibility'))).toBe('needs_setup')
   })

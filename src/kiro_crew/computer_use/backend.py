@@ -84,6 +84,10 @@ LINUX_REASON = (
     "Kiro Crew has no native Linux driver; set the computer-use driver to auto or "
     "upstream to use the open-source desktop driver"
 )
+MACOS_UPSTREAM_REASON = (
+    "the open-source desktop driver is not offered on macOS yet; set the computer-use "
+    "driver to auto or native to use the built-in macOS driver"
+)
 UNKNOWN_PLATFORM_REASON = "this operating system has no computer-use driver"
 DRIVER_IMPORT_REASON = "the native computer-use driver could not be loaded ({detail})"
 
@@ -401,6 +405,7 @@ def run_launch(
     permit: "Callable[[LaunchIdentity], str | None] | None" = None,
     identity: "Callable[[str, str], LaunchIdentity] | None" = None,
     refuse_launched: "Callable[[AppRef], str | None] | None" = None,
+    find_launched: "Callable[[LaunchIdentity], AppRef | None] | None" = None,
     window_timeout: float = LAUNCH_WINDOW_TIMEOUT_SECS,
     window_poll_interval: float = LAUNCH_POLL_INTERVAL_SECS,
 ) -> DriverResult:
@@ -478,13 +483,20 @@ def run_launch(
     # from the one that got launched. So the check moves to where the resolved identity is
     # known, and is applied to ALL of its spellings, which is also the last point before
     # ``spawn``. A detached spawn cannot be undone, so this must precede it.
+    who = identity(target, name) if identity is not None else LaunchIdentity(display=name)
     if permit is not None:
-        who = identity(target, name) if identity is not None else LaunchIdentity(display=name)
         refusal = permit(who)
         if refusal:
             return DriverResult(ok=False, text=refusal)
 
-    existing = find(name)
+    # *find_launched* matches a window on the RESOLVED identity the policy just
+    # cleared (``who.key``: the executable, bundle id or desktop program), so a
+    # window of another app that shares the display name is never taken for it.
+    # Without it (the native drivers) the display-name lookup is kept.
+    def lookup() -> "AppRef | None":
+        return find_launched(who) if find_launched is not None else find(name)
+
+    existing = lookup()
     if existing is not None:
         # Refused rather than re-launched: a second copy of an editor is a second
         # unsaved document, and the model's actual goal — a window to drive — is
@@ -504,7 +516,7 @@ def run_launch(
         )
 
     appeared, waited = await_launched_window(
-        lambda: find(name), timeout=window_timeout, interval=window_poll_interval
+        lookup, timeout=window_timeout, interval=window_poll_interval
     )
     if appeared is None:
         # A SUCCESS with a caveat, not a failure. The process did start; reporting
@@ -632,12 +644,15 @@ WINDOWS_AUTO_UPSTREAM = True
 
 
 def upstream_installed() -> bool:
-    """Whether the pinned upstream driver is installed (reads the record only)."""
+    """Whether the pinned upstream driver is installed AND usable: installed (the
+    record) and not stopped at its last launch by the system (endpoint security
+    software). Windows ``auto`` keeps the native driver otherwise."""
     try:
         from kiro_crew.computer_use.driver_runtime import install as install_mod
         from kiro_crew.config.paths import data_home
 
-        return install_mod.install_state(data_home()).installed
+        home = data_home()
+        return install_mod.install_state(home).installed and not install_mod.read_blocked(home)
     except Exception:
         logger.debug("upstream install state unreadable", exc_info=True)
         return False
@@ -687,7 +702,7 @@ def select_default_backend() -> ComputerUseBackend:
     choice = _driver_choice()
     if platform_compat.IS_MACOS:
         if choice == DRIVER_UPSTREAM:
-            return _upstream_backend(PLATFORM_MACOS)
+            return UnsupportedBackend(PLATFORM_MACOS, MACOS_UPSTREAM_REASON)
         try:
             # Deferred + circular: macos_driver subclasses ComputerUseBackend.
             from kiro_crew.computer_use.macos_driver import MacOSBackend
