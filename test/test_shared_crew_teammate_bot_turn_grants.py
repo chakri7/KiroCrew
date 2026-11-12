@@ -31,6 +31,7 @@ from chat_runner_coverage_helpers import (
     _drive,
     _permission,
     _runner_state,
+    _settle,
     _slot,
 )
 from chat_test_helpers import _make_state
@@ -589,3 +590,85 @@ async def test_after_a_teammates_turn_the_owners_trust_reaches_the_threads_sub_a
 
     slot._trust = True
     assert trust_reaches_subagents(slot) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("teammate", "path", "status"),
+    [
+        (True, "/api/member/self/notes", 403),
+        (True, "/api/member/self/update", 403),
+        (True, "/api/member/self/goals/report", 403),
+        (True, "/api/member/self/goals/key-result", 403),
+        # A read of its own goals stays open.
+        (True, "/api/member/self/goals/read", 200),
+        # The owner's turn keeps every pre-allowed write.
+        (False, "/api/member/self/notes", 200),
+        (False, "/api/member/self/update", 200),
+    ],
+)
+async def test_a_teammates_bot_turn_cannot_rewrite_the_bots_own_record(teammate, path, status):
+    # These kirocrew-mate tools run without a prompt (spec_grants._MATE_AUTO_GRANTS),
+    # so the gateway route is where a teammate's turn is held.
+    from kiro_crew.dashboard import card_send
+
+    @web.middleware
+    async def _internal(request, handler):
+        request["internal_auth"] = True
+        return await handler(request)
+
+    async def _ok(_request):
+        return web.json_response({"ok": True})
+
+    app = web.Application(middlewares=[_internal, card_send.card_turn_delegation_middleware])
+    for route in (
+        "/api/member/self/notes",
+        "/api/member/self/update",
+        "/api/member/self/goals/report",
+        "/api/member/self/goals/key-result",
+        "/api/member/self/goals/read",
+    ):
+        app.router.add_post(route, _ok)
+    with patch("kiro_crew.dashboard.chat_handlers.sel"), _mark(teammate):
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(path, json={}, headers={"X-Session-Key": _BOT})
+            body = await resp.json()
+    assert resp.status == status, body
+    if status == 403:
+        assert body["code"] == "teammate_turn_self_write_refused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("grant", ["trust", "yolo"])
+@pytest.mark.parametrize("teammate", [True, False])
+async def test_a_teammates_declined_auto_approval_is_audited(tmp_path, grant, teammate):
+    # The owner's Trust or YOLO is on; the teammate's call asks, and the decline is
+    # written. The owner's own call auto-approves and writes no decline.
+    state, client = _runner_state(tmp_path)
+    slot = _bot_slot("trust" if grant == "trust" else "")
+    slot.mode = "chat"
+    _script(client, slot)
+    if grant == "yolo":
+        state.is_yolo_active = MagicMock(return_value=True)
+    audit = MagicMock()
+    with (
+        patch.object(chat_runner, "tool_approval_timeout_secs", return_value=0.0),
+        patch.object(chat_runner, "sel", return_value=audit),
+        patch.object(chat_runner, "safety_override") as override,
+        attribution.teammate_origin(teammate),
+    ):
+        override.return_value.is_cli_launch = False
+        slot._empty_response_retries = 2
+        await chat_runner._run_chat(state, slot, "hello")
+        await _settle(slot)
+
+    declines = [
+        c.kwargs
+        for c in audit.log_tool_invocation.call_args_list
+        if c.kwargs.get("outcome") == "auto_approve_declined"
+    ]
+    if teammate:
+        assert [d["metadata"]["reason"] for d in declines] == ["teammate_turn"]
+    else:
+        assert declines == []
+        client.approve_tool.assert_awaited_once_with("req-cov-1")

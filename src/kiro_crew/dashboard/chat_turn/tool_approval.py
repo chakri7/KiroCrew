@@ -1411,6 +1411,15 @@ async def _decide_permission_request(turn: _ChatTurn, event) -> Literal[_Flow.CO
         _audit_card_turn_decline(session_key=session_key, slot=slot, event=event, tier="trust")
         slot_trusted = False
         yolo_active = False
+    elif teammate_bot_turn(slot) and (
+        getattr(slot, "_trust", False) is True
+        or str(getattr(slot, "_trust_scope", "") or "")
+        or state.is_yolo_active()
+    ):
+        # A teammate's Bot turn already reads neither grant (``_slot_is_trusted`` and
+        # ``yolo_reaches`` answer no), so the decline is recorded here: the owner's
+        # Trust or YOLO is on, and this call asks instead.
+        _audit_card_turn_decline(session_key=session_key, slot=slot, event=event, tier="trust")
     if (
         slot._trust_reads
         and not slot_trusted

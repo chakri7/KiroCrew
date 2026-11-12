@@ -217,7 +217,43 @@ async def card_turn_delegation_middleware(request: web.Request, handler: Any) ->
         )
         _audit(request, None, refusal)
         return refusal
+    if (
+        request.get("internal_auth") is True
+        and request.method == "POST"
+        and request.path in _TEAMMATE_SELF_WRITE_ROUTES
+        and _teammate_bot_turn_on(request.headers.get("X-Session-Key", "").strip())
+    ):
+        refusal = _refuse(
+            403,
+            "teammate_turn_self_write_refused",
+            "a teammate's turn on a Bot's thread cannot change the Bot's own record",
+        )
+        _audit(request, None, refusal)
+        return refusal
     return await handler(request)
+
+
+#: The Bot's own-record writes its ``kirocrew-mate`` tools make without a prompt
+#: (``agent_parts.spec_grants._MATE_AUTO_GRANTS``): ``update_self`` (name,
+#: description, face), ``save_notes`` (its briefing), ``save_goal_report`` and
+#: ``key_result_progress`` (its goal readings). Each is pre-allowed because the
+#: owner asked for it in the Bot's own chat; a teammate's turn there is not the
+#: owner's word, so these answer 403. Reads and card offers are untouched.
+_TEAMMATE_SELF_WRITE_ROUTES = frozenset(
+    {
+        "/api/member/self/update",
+        "/api/member/self/notes",
+        "/api/member/self/goals/report",
+        "/api/member/self/goals/key-result",
+    }
+)
+
+
+def _teammate_bot_turn_on(session_key: str) -> bool:
+    """Whether a teammate's turn on a Bot's thread runs on *session_key* now."""
+    from kiro_crew.dashboard.approval_posture import teammate_turn_running
+
+    return bool(session_key) and teammate_turn_running(session_key)
 
 
 def card_turn_cron_tool_refusal(
